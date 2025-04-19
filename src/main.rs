@@ -6,35 +6,38 @@ mod lexer;
 mod parser;
 mod token;
 
-// Keep Parser, call parse_program
-// Use Program codegen entry point
 use codegen::Compiler;
 use lexer::Lexer;
-// Use Program parser entry point
 use parser::Parser;
-// Keep Compiler, call compile_program
-// src/main.rs
 
 use inkwell::context::Context;
-use inkwell::execution_engine::JitFunction;
-// ... imports ...
-use inkwell::OptimizationLevel;
+use std::path::Path;
+// For output file path
+use std::process::Command;
+// To call linker (e.g., clang)
 
-type MainFuncSignature = unsafe extern "C" fn() -> f64;
+// Remove JIT type alias if not used
+// type MainFuncSignature = unsafe extern "C" fn() -> f64;
 
 fn main() {
     let input = r#"
-        fun calculate(a, b) {
-            let x = a + 1.0; // Intermediate var x
-            let y = b + 2.0; // Intermediate var y
-            let z = x * y;   // Intermediate var z
-            z - a;           // Return value uses z and a
+        fun multiply(a, b) {
+            let result = a * b;
+            result;
         }
 
-        calculate(5.0, 10.0); // Expected: ((5+1)*(10+2)) - 5 = (6*12)-5 = 72-5 = 67.0
+        fun calculate(a, b) {
+            let x = a + 1.0;
+            let y = b + 2.0;
+            let z = x * y;
+            z - a;
+        }
+
+        let x = calculate(5.0, 10.0); // 67.0
+        multiply(x, 2.0);            // Expected result: 67.0 * 2.0 = 134.0
     "#;
-    // Try: "fun id(x) { x; } id(123);" -> 123.0
-    // Try: "fun adder(a,b,c) {a+b+c;} adder(1,2,3);" -> 6.0
+
+    let output_filename = "output.o"; // Name for the object file
 
     println!("Input:\n{}", input);
 
@@ -55,19 +58,18 @@ fn main() {
         }
     };
 
-    // --- Code Generation & JIT ---
+    // --- Code Generation ---
     let context = Context::create();
-    let module = context.create_module("toy_jit_func");
+    let module = context.create_module("toy_module_obj"); // Module name
     let builder = context.create_builder();
     let mut compiler = Compiler::new(&context, &builder, &module);
 
-    // Compile the program. This generates 'main' and also compiles function definitions found.
-    let main_function = match compiler.compile_program(&program) {
-        Ok(f) => {
-            println!("\n--- Generated LLVM IR (Module) ---");
-            // Print the whole module now to see both functions
-            module.print_to_stderr();
-            f // Return the main function value
+    // Compile the program AST into the LLVM module
+    match compiler.compile_program_to_module(&program) {
+        // Use new method
+        Ok(()) => {
+            println!("\n--- LLVM IR (Module) ---");
+            module.print_to_stderr(); // Print IR before emission
         }
         Err(e) => {
             eprintln!("\nCode Generation Error: {}", e);
@@ -77,20 +79,55 @@ fn main() {
         }
     };
 
-    // --- JIT Execution --- (remains the same)
-    // ... initialize_native, create_jit_execution_engine ...
-    // ... get_function("main"), call ...
-    println!("\n--- JIT Execution ---");
-    inkwell::targets::Target::initialize_native(&inkwell::targets::InitializationConfig::default())
-        .expect("Failed to initialize native target");
-    let execution_engine = module
-        .create_jit_execution_engine(OptimizationLevel::Default)
-        .expect("Failed to create Execution Engine");
-    let main_func_jit: JitFunction<MainFuncSignature> =
-        unsafe { execution_engine.get_function("main") }
-            .expect("Failed to find JIT function 'main'");
+    // --- Emit Object File ---
+    let obj_path = Path::new(output_filename);
+    match compiler.emit_object_file(obj_path) {
+        Ok(()) => {
+            println!("Successfully emitted object file: {}", output_filename);
+        }
+        Err(e) => {
+            eprintln!("\nObject File Emission Error: {}", e);
+            return;
+        }
+    }
 
-    println!("Executing JITed code...");
-    let result = unsafe { main_func_jit.call() };
-    println!("JIT Execution Result: {}", result);
+    // --- Linking (Optional - using external linker like clang) ---
+    link_object_file(obj_path, "output_executable"); // Specify desired executable name
+} // Context, Module, Builder dropped here
+
+/// Links the generated object file using an external linker (e.g., clang).
+/// Assumes a 'main' function compatible with C linking exists in the object file.
+/// NOTE: Our current 'main' returns f64, which isn't the standard C main signature (int()).
+/// Linking might succeed, but running it might crash or behave unexpectedly
+/// without a proper C entry point or runtime setup.
+/// For now, we just demonstrate the linking command.
+fn link_object_file(obj_path: &Path, executable_name: &str) {
+    println!("\n--- Linking ---");
+    let linker = "clang"; // Use clang as linker (handles C library linking)
+    println!("Attempting to link {} using {}", obj_path.display(), linker);
+
+    let status = Command::new(linker)
+        .arg(obj_path) // Input object file
+        .arg("-o") // Specify output executable name
+        .arg(executable_name)
+        // Add libraries if needed, e.g. .arg("-lm") for math library
+        .status(); // Execute the command
+
+    match status {
+        Ok(exit_status) if exit_status.success() => {
+            println!("Successfully linked executable: {}", executable_name);
+            println!(
+                "NOTE: Running this executable might not work as expected due to non-standard main signature."
+            );
+            println!("You can inspect it with: file {}", executable_name);
+            // To run (might crash/print garbage): ./{executable_name}; echo $?
+        }
+        Ok(exit_status) => {
+            eprintln!("Linking failed with status: {}", exit_status);
+        }
+        Err(e) => {
+            eprintln!("Failed to execute linker '{}': {}", linker, e);
+            eprintln!("Ensure '{}' is installed and in your PATH.", linker);
+        }
+    }
 }

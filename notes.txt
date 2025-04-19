@@ -1,0 +1,10 @@
+Proper Executable: Modify main generation (or add a C wrapper) to correctly print the result using printf.
+Standard Library: Provide built-in functions (like print) (and also a way to make custom library functions in a way such that other users can easily implement their own without knwoing the internals of the compiler).
+More Types: Add integers, booleans, maybe strings.
+Mutable Variables: Change let to immutable by default and add var for mutable variables (requires careful handling of store in codegen).
+Control Flow: Implement if/else statements, while or for loops (requires generating LLVM branches and blocks).
+Arrays/Lists: Add data structures.
+Return Statement: Add an explicit return keyword.
+Type Checking: Implement a semantic analysis phase between parsing and codegen to catch type errors (e.g., adding a number to a function).
+Error Reporting: Improve error messages with line/column numbers.
+Module System: Allow importing code from other files.

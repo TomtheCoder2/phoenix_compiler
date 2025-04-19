@@ -11,6 +11,8 @@ use inkwell::values::{AnyValue, BasicValueEnum, FloatValue, FunctionValue, Point
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
+use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple};
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -412,93 +414,148 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         }
     }
 
-    pub fn compile_program(
-        &mut self,
-        program: &Program,
-    ) -> Result<FunctionValue<'ctx>, CodeGenError> {
-        // Setup Main Function
+    // Compile the program into functions within the module, optimize them
+    // Returns Ok(()) on success, indicating the module is ready for emission
+    pub fn compile_program_to_module(&mut self, program: &Program) -> Result<(), CodeGenError> {
+        // --- Setup Main Function (Placeholder/Wrapper if needed) ---
+        // We still need *a* function to anchor the compilation if the program
+        // only contains function definitions but no top-level statements to execute.
+        // However, the actual execution logic might come from a different "main".
+        // For now, let's keep generating the implicit 'main' based on top-level statements.
+        // If program has only `fun` defs, main will just return 0.0.
+
         let f64_type = self.context.f64_type();
         let main_fn_type = f64_type.fn_type(&[], false);
-        let main_function = self.module.add_function("main", main_fn_type, None);
+        let main_function = self.module.add_function("main", main_fn_type, None); // Or maybe a different name like "_start" if linking directly
         let entry_block = self.context.append_basic_block(main_function, "entry");
 
-        // Save Compiler State
+        // --- Save/Restore context (as in compile_program) ---
         let original_builder_pos = self.builder.get_insert_block();
         let original_func = self.current_function;
         let original_vars = self.variables.clone();
-
         self.builder.position_at_end(entry_block);
         self.current_function = Some(main_function);
         self.variables.clear();
 
-        // Compile Top-Level Statements
+        // --- Compile Top-Level Statements ---
         let mut last_main_expr_value: Option<FloatValue<'ctx>> = None;
-
         for stmt in &program.statements {
-            match self.compile_statement(stmt) {
-                Ok(Some(value)) => last_main_expr_value = Some(value),
-                Ok(None) => {}
-                Err(e) => {
-                    // Restore state before returning error
-                    self.variables = original_vars;
-                    self.current_function = original_func;
-                    if let Some(bb) = original_builder_pos {
-                        self.builder.position_at_end(bb);
-                    }
-                    unsafe {
-                        main_function.delete();
-                    }
-                    return Err(e);
-                }
+            // Compile each statement (which includes function definitions)
+            match self.compile_statement(stmt)? {
+                Some(value) => last_main_expr_value = Some(value),
+                None => {}
             }
+            // Note: compile_statement now runs FPM on functions it defines
         }
 
-        // Build Return for Main
+        // --- Build Return for Main ---
         if let Some(return_value) = last_main_expr_value {
             self.builder.build_return(Some(&return_value));
         } else {
             self.builder.build_return(Some(&f64_type.const_float(0.0)));
         }
 
-        // Restore Compiler State (before optimizing main)
+        // --- Optimize Main ---
+        if main_function.verify(true) {
+            let changed = self.fpm.run_on(&main_function);
+            if changed {
+                println!("Optimizer changed function 'main'");
+            }
+            if !main_function.verify(true) {
+                // Handle verification failure after optimization
+                unsafe {
+                    main_function.delete();
+                } // Clean up module
+                // Restore context before error return
+                self.variables = original_vars;
+                self.current_function = original_func;
+                if let Some(bb) = original_builder_pos {
+                    self.builder.position_at_end(bb);
+                }
+                return Err(CodeGenError::LlvmError(
+                    "Main function verification failed after optimization".to_string(),
+                ));
+            }
+        } else {
+            // Handle verification failure before optimization
+            unsafe {
+                main_function.delete();
+            }
+            self.variables = original_vars;
+            self.current_function = original_func;
+            if let Some(bb) = original_builder_pos {
+                self.builder.position_at_end(bb);
+            }
+            return Err(CodeGenError::LlvmError(
+                "Main function verification failed before optimization".to_string(),
+            ));
+        }
+
+        // --- Restore Compiler State ---
         self.variables = original_vars;
         self.current_function = original_func;
         if let Some(bb) = original_builder_pos {
             self.builder.position_at_end(bb);
         }
 
-        // Optionally Optimize main()
-        if main_function.verify(true) {
-            let changed = self.fpm.run_on(&main_function);
-            if changed {
-                println!("Optimizer changed function 'main'");
-            }
+        Ok(()) // Indicate module is ready
+    }
 
-            // Re-verify after optimizing main
-            if !main_function.verify(true) {
-                eprintln!(
-                    "Invalid main function after optimization:\n{}",
-                    main_function.print_to_string().to_string()
-                );
-                unsafe {
-                    main_function.delete();
-                }
-                return Err(CodeGenError::LlvmError(
-                    "Main function verification failed after optimization".to_string(),
-                ));
-            }
-            Ok(main_function) // Return optimized main
-        } else {
-            eprintln!(
-                "Invalid main function before optimization:\n{}",
-                main_function.print_to_string().to_string()
-            );
-            unsafe {
-                main_function.delete();
-            }
-            Err(CodeGenError::LlvmError(
-                "Main function verification failed before optimization".to_string(),
+    /// Emits the compiled module to an object file.
+    /// Should be called *after* compile_program_to_module.
+    pub fn emit_object_file(&self, output_path: &Path) -> Result<(), CodeGenError> {
+        // --- Target Configuration ---
+        // Determine Target Triple for M4 Pro Mac
+        let target_triple = &TargetTriple::create("aarch64-apple-darwin"); // ARM64 macOS
+
+        // Initialize required targets (native is usually sufficient for host compilation)
+        Target::initialize_native(&InitializationConfig::default()).map_err(|e| {
+            CodeGenError::LlvmError(format!("Failed to initialize native target: {}", e))
+        })?;
+        // Alternatively, initialize specific targets: Target::initialize_aarch64(&InitializationConfig::default());
+
+        // --- Target Lookup ---
+        let target = Target::from_triple(target_triple).map_err(|e| {
+            CodeGenError::LlvmError(format!(
+                "Failed to get target for triple '{}': {}",
+                target_triple, e
             ))
-        }
+        })?;
+
+        // --- Create Target Machine ---
+        // Configure CPU, features, optimization level etc.
+        let cpu = "apple-m4"; // Be specific for M4 - "generic" or "" might also work
+        let features = ""; // Use "" for default features for the CPU
+        let opt_level = OptimizationLevel::Default; // Or match FPM level used
+        let reloc_mode = RelocMode::Default; // Position Independent Code (PIC) is common default
+        let code_model = CodeModel::Default; // Small/Kernel/Medium/Large - Default is usually fine
+
+        let target_machine = target
+            .create_target_machine(
+                target_triple,
+                cpu,
+                features,
+                opt_level,
+                reloc_mode,
+                code_model,
+            )
+            .ok_or_else(|| {
+                CodeGenError::LlvmError(format!(
+                    "Failed to create target machine for triple '{}'",
+                    target_triple
+                ))
+            })?;
+
+        // --- Emit Object File ---
+        println!("Emitting object file to: {}", output_path.display());
+        target_machine
+            .write_to_file(
+                &self.module,     // The LLVM module containing the compiled code
+                FileType::Object, // Specify we want an object file
+                output_path,
+            )
+            .map_err(|e| CodeGenError::LlvmError(format!("Failed to write object file: {}", e)))?;
+
+        Ok(())
     }
 }
