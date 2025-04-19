@@ -1,23 +1,29 @@
-#[derive(Debug, PartialEq, Clone)] // Added Clone
+// src/token.rs
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     // Special Tokens
-    Illegal(char), // Represents a character we don't understand
-    Eof,           // Represents the end of the input file
+    Illegal(char),
+    Eof,
 
     // Literals
-    Number(f64), // Represents a floating-point number, e.g., 123.45
+    Number(f64),
 
     // Operators
     Plus,        // '+'
     Minus,       // '-'
     Star,        // '*'
     Slash,       // '/'
+    Assign,      // '=' // Added
 
     // Delimiters
     LParen,      // '('
     RParen,      // ')'
 
-    // Keywords (We'll add these later)
+    // Keywords
+    Let,         // 'let' // Added
+    In,          // 'in'  // Added
 
-    // Identifiers (We'll add these later)
+    // Identifiers
+    Identifier(String), // e.g., "my_variable" // Added
 }

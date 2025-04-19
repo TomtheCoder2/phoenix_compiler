@@ -1,28 +1,29 @@
 // src/main.rs
 
-mod token;
-mod lexer;
 mod ast;
-mod parser;
 mod codegen;
+mod lexer;
+mod parser;
+mod token;
 
+use codegen::Compiler;
 use lexer::Lexer;
 use parser::Parser;
-use codegen::Compiler;
+// src/main.rs
 
-// Import inkwell types needed for JIT
 use inkwell::context::Context;
-use inkwell::execution_engine::{ExecutionEngine, JitFunction}; // Added JitFunction
-use inkwell::OptimizationLevel; // To specify optimization level for JIT
+use inkwell::execution_engine::JitFunction;
+// ... imports ...
+use inkwell::OptimizationLevel;
 
-// Define the function signature for our JITed 'main' function
-// It takes no arguments and returns an f64 (double)
 type MainFuncSignature = unsafe extern "C" fn() -> f64;
 
 fn main() {
-    let input = "1 + 2.5 * ( 30 / 4 - 2) - .5";
-    // Try: "5.0 * 3.0" -> 15.0
-    // Try: "100.0 / (2.0 * 5.0)" -> 10.0
+    // Input with variables
+    let input = "let x = 10 in let y = x + 5 in y * 2"; // Expected: (10 + 5) * 2 = 30.0
+    // Try: "let a=1 in let b=2 in a+b" -> 3.0
+    // Try: "let factor = 5.0 in factor * (factor - 2.0)" -> 5.0 * 3.0 = 15.0
+    // Try: "let x=1 in x + (let x=2 in x)" -> Should this be 1 + 2 = 3 (shadowing)? Yes, our current logic handles this.
 
     println!("Input: {}", input);
 
@@ -36,73 +37,46 @@ fn main() {
         }
         Err(e) => {
             eprintln!("Parsing Error: {}", e);
+            // Maybe print tokens seen so far if debugging lexer/parser interaction
             return;
         }
     };
 
     // --- Code Generation & JIT ---
     let context = Context::create();
-    let module = context.create_module("toy_jit"); // Module name can be anything
+    let module = context.create_module("toy_jit_var");
     let builder = context.create_builder();
-
-    // Compiler setup
     let mut compiler = Compiler::new(&context, &builder, &module);
 
-    // Compile the AST
     let main_function = match compiler.compile(&ast) {
         Ok(f) => {
             println!("\n--- Generated LLVM IR ---");
             f.print_to_stderr();
-            f // Return the function on success
+            f
         }
         Err(e) => {
             eprintln!("\nCode Generation Error: {}", e);
-            module.print_to_stderr(); // Print module IR even on error for debugging
-            return;
-        }
-    };
-
-    // --- JIT Execution ---
-    println!("\n--- JIT Execution ---");
-
-    // 1. Initialize LLVM target components needed for JIT
-    //    We initialize for the native target.
-    inkwell::targets::Target::initialize_native(&inkwell::targets::InitializationConfig::default())
-        .expect("Failed to initialize native target");
-
-    // 2. Create the JIT Execution Engine
-    //    We need a Result here as JIT creation can fail (e.g., if the target isn't supported)
-    let execution_engine_result: Result<ExecutionEngine, _> =
-        module.create_jit_execution_engine(OptimizationLevel::None); // Use OptLevel::None for now, see Note below
-
-    let execution_engine = match execution_engine_result {
-        Ok(ee) => ee,
-        Err(err) => {
-            eprintln!("Failed to create Execution Engine: {}", err);
-            return;
-        }
-    };
-
-    // 3. Get a callable function pointer from the JIT engine
-    //    The function name must match the one we added in codegen (`"main"`)
-    let main_func_jit_result: Result<JitFunction<MainFuncSignature>, _> =
-        unsafe { execution_engine.get_function("main") }; // unsafe: retrieving function ptrs
-
-    let main_func_jit = match main_func_jit_result {
-        Ok(f) => f,
-        Err(err) => {
-            eprintln!("Failed to get JIT function 'main': {}", err);
-            // Often useful to dump the module IR if the function isn't found
-            eprintln!("Module IR state:");
+            // Dump module even on error to see partial IR
+            eprintln!("--- Module IR State on Error ---");
             module.print_to_stderr();
             return;
         }
     };
 
+    // --- JIT Execution --- (remains the same)
+    println!("\n--- JIT Execution ---");
+    inkwell::targets::Target::initialize_native(&inkwell::targets::InitializationConfig::default())
+        .expect("Failed to initialize native target");
 
-    // 4. Call the JIT-compiled function
+    let execution_engine = module
+        .create_jit_execution_engine(OptimizationLevel::None)
+        .expect("Failed to create Execution Engine"); // Simplified error handling
+
+    let main_func_jit: JitFunction<MainFuncSignature> =
+        unsafe { execution_engine.get_function("main") }
+            .expect("Failed to find JIT function 'main'"); // Simplified error handling
+
     println!("Executing JITed code...");
-    let result = unsafe { main_func_jit.call() }; // unsafe: calling raw machine code
+    let result = unsafe { main_func_jit.call() };
     println!("JIT Execution Result: {}", result);
-
-} // Context, Module, Builder, ExecutionEngine are dropped here, cleaning up LLVM resources.
+}
