@@ -11,30 +11,26 @@ use lexer::Lexer;
 use parser::Parser;
 
 use inkwell::context::Context;
+// To call linker (e.g., clang)
+use std::io::{self, Write};
 use std::path::Path;
 // For output file path
 use std::process::Command;
-// To call linker (e.g., clang)
+// Add import
 
 // Remove JIT type alias if not used
 // type MainFuncSignature = unsafe extern "C" fn() -> f64;
 
+#[unsafe(no_mangle)]
+pub extern "C" fn print_f64_wrapper(value: f64) {
+    println!("{:.6}", value); // Or use libc::printf if you add the dependency
+}
+
 fn main() {
     let input = r#"
-        fun multiply(a, b) {
-            let result = a * b;
-            result;
-        }
-
-        fun calculate(a, b) {
-            let x = a + 1.0;
-            let y = b + 2.0;
-            let z = x * y;
-            z - a;
-        }
-
-        let x = calculate(5.0, 10.0); // 67.0
-        multiply(x, 2.0);            // Expected result: 67.0 * 2.0 = 134.0
+        print(5);
+        print(6);
+        print(7);
     "#;
 
     let output_filename = "output.o"; // Name for the object file
@@ -101,30 +97,57 @@ fn main() {
 /// Linking might succeed, but running it might crash or behave unexpectedly
 /// without a proper C entry point or runtime setup.
 /// For now, we just demonstrate the linking command.
+// src/main.rs -> link_object_file function
+
 fn link_object_file(obj_path: &Path, executable_name: &str) {
     println!("\n--- Linking ---");
-    let linker = "clang"; // Use clang as linker (handles C library linking)
-    println!("Attempting to link {} using {}", obj_path.display(), linker);
+    let linker = "clang";
+    // Determine the path to the static library produced by cargo build
+    // Usually in target/debug/ or target/release/
+    // Use CARGO_TARGET_DIR if set, otherwise assume ./target/debug
+    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
+    // Adjust debug/release based on your build profile
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let lib_name = "libtoylang_compiler.a"; // Matches package name by default
+    let lib_path = Path::new(&target_dir).join(profile).join(lib_name);
+
+    if !lib_path.exists() {
+        eprintln!(
+            "Linking Error: Static library not found at {}",
+            lib_path.display()
+        );
+        eprintln!("Ensure you have run 'cargo build' first.");
+        return;
+    }
+
+    println!(
+        "Attempting to link {} with library {} using {}",
+        obj_path.display(),
+        lib_path.display(),
+        linker
+    );
 
     let status = Command::new(linker)
-        .arg(obj_path) // Input object file
-        .arg("-o") // Specify output executable name
+        .arg(obj_path) // Input object file from ToyLang code
+        .arg(lib_path) // Input static library containing the wrapper
+        .arg("-o")
         .arg(executable_name)
-        // Add libraries if needed, e.g. .arg("-lm") for math library
-        .status(); // Execute the command
+        .status();
 
     match status {
         Ok(exit_status) if exit_status.success() => {
             println!("Successfully linked executable: {}", executable_name);
-            println!("You can inspect it with: file {}", executable_name);
-            // To run (might crash/print garbage): ./{executable_name}; echo $?
+            println!("You should now be able to run './{}'", executable_name);
         }
         Ok(exit_status) => {
             eprintln!("Linking failed with status: {}", exit_status);
         }
         Err(e) => {
             eprintln!("Failed to execute linker '{}': {}", linker, e);
-            eprintln!("Ensure '{}' is installed and in your PATH.", linker);
         }
     }
 }
