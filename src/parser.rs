@@ -93,45 +93,134 @@ impl<'a> Parser<'a> {
     // --- Main Parsing Logic: Parse the whole program ---
 
     pub fn parse_program(&mut self) -> Result<Program, Vec<ParseError>> {
+        // Loop until EOF, call parse_statement, collect results/errors
         let mut statements = Vec::new();
         let mut errors = Vec::new();
 
-        // Loop until End-of-File token
         while self.current_token != Token::Eof {
             match self.parse_statement() {
                 Ok(stmt) => statements.push(stmt),
                 Err(err) => {
                     errors.push(err);
-                    // Error recovery: Skip tokens until the next semicolon or EOF
-                    // to try and parse subsequent statements. This is basic recovery.
-                    while self.current_token != Token::Semicolon && self.current_token != Token::Eof
+                    // Basic error recovery
+                    while self.current_token != Token::Semicolon
+                        && self.current_token != Token::RBrace
+                        && self.current_token != Token::Eof
                     {
+                        // Also recover on RBrace
                         self.next_token();
                     }
-                    // Consume the semicolon that likely caused the error or ended the recovery attempt
-                    if self.current_token == Token::Semicolon {
+                    if self.current_token == Token::Semicolon || self.current_token == Token::RBrace
+                    {
                         self.next_token();
                     }
                 }
             }
         }
-
+        // ... return Ok(Program) or Err(errors) ...
         if errors.is_empty() {
             Ok(Program { statements })
         } else {
-            Err(errors) // Return all collected errors
+            Err(errors)
         }
     }
 
     // --- Statement Parsing ---
 
-    // Parses a single statement based on the current token
+    // --- Statement Parsing ---
     fn parse_statement(&mut self) -> ParseResult<Statement> {
         match self.current_token {
             Token::Let => self.parse_let_statement(),
-            // Anything else starts an expression statement
+            Token::Fun => self.parse_function_definition(), // Added fun
             _ => self.parse_expression_statement(),
         }
+    }
+
+    // Parses: fun IDENT ( [IDENT [, IDENT]*]? ) { PROGRAM } ;? <-- Note: semicolon is optional/discouraged after }
+    fn parse_function_definition(&mut self) -> ParseResult<Statement> {
+        self.next_token(); // Consume 'fun'
+
+        // Expect function name (Identifier)
+        let name = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return Err(ParseError::ExpectedIdentifier),
+        };
+        self.next_token(); // Consume function name
+
+        // Expect '(' for parameters
+        self.expect_and_consume(Token::LParen)?;
+
+        // Parse parameter list
+        let params = self.parse_parameter_list()?; // Expects ')' inside
+
+        // Expect '{' for body
+        self.expect_and_consume(Token::LBrace)?;
+
+        // Parse the body (which is a sequence of statements, i.e., a Program)
+        // We need a way to parse statements until '}'
+        let body = self.parse_block_statements()?; // Expects '}' inside
+
+        // Optional semicolon after '}' - let's just consume if present
+        if self.current_token == Token::Semicolon {
+            self.next_token();
+        }
+
+        Ok(Statement::FunctionDef {
+            name,
+            params,
+            body: Box::new(body),
+        })
+    }
+
+    // Helper to parse IDENT [, IDENT]* within parentheses
+    fn parse_parameter_list(&mut self) -> ParseResult<Vec<String>> {
+        let mut params = Vec::new();
+
+        // Handle empty parameter list: fun foo() { ... }
+        if self.current_token == Token::RParen {
+            self.next_token(); // Consume ')'
+            return Ok(params);
+        }
+
+        // Expect first parameter identifier
+        match &self.current_token {
+            Token::Identifier(name) => params.push(name.clone()),
+            _ => return Err(ParseError::ExpectedIdentifier),
+        }
+        self.next_token(); // Consume identifier
+
+        // Expect subsequent parameters (comma followed by identifier)
+        while self.current_token == Token::Comma {
+            self.next_token(); // Consume ','
+            match &self.current_token {
+                Token::Identifier(name) => params.push(name.clone()),
+                _ => return Err(ParseError::ExpectedIdentifier),
+            }
+            self.next_token(); // Consume identifier
+        }
+
+        // Expect closing ')'
+        self.expect_and_consume(Token::RParen)?;
+
+        Ok(params)
+    }
+
+    // Helper to parse statements within { ... }
+    fn parse_block_statements(&mut self) -> ParseResult<Program> {
+        let mut statements = Vec::new();
+        // Note: Does not collect errors like top-level parse_program, stops on first error.
+        // Could be enhanced later.
+
+        // Loop until RBrace or EOF
+        while self.current_token != Token::RBrace && self.current_token != Token::Eof {
+            let stmt = self.parse_statement()?; // Parse one statement
+            statements.push(stmt);
+        }
+
+        // Expect closing '}'
+        self.expect_and_consume(Token::RBrace)?;
+
+        Ok(Program { statements })
     }
 
     // Parses: let IDENT = EXPRESSION ;
@@ -171,64 +260,80 @@ impl<'a> Parser<'a> {
 
     // --- Expression Parsing (Pratt Parser - mostly unchanged internally) ---
 
-    // Renamed from parse_expression_recursive to clarify it parses expressions
+    // --- Expression Parsing ---
     fn parse_expression(&mut self, min_precedence: u8) -> ParseResult<Expression> {
-        // Parse prefix expression (number, identifier, '(', maybe unary later)
-        // Note: we now get token ownership issues if parse_prefix fails and we try to consume
-        // Let parse_prefix consume its token ON SUCCESS.
-        let mut left = self.parse_prefix()?;
+        // Parse prefix first
+        let mut left = self.parse_prefix()?; // Consumes its token(s) on success
 
+        // Loop for infix operators OR function calls after a potential prefix
+        loop {
+            match self.current_token {
+                // Infix Binary Operators (check precedence)
+                ref tok
+                    if precedence(tok) > min_precedence && token_to_binary_op(tok).is_some() =>
+                {
+                    let op = token_to_binary_op(&self.current_token).unwrap();
+                    let current_precedence = precedence(&self.current_token);
+                    self.next_token(); // Consume operator
 
-        // Loop for infix operators
-        // Use peek_token for lookahead on operator precedence
-        while min_precedence < precedence(&self.current_token) // Look ahead for operator
-            && token_to_binary_op(&self.current_token).is_some()
-        {
-            // Now that peek_token is an operator, consume it (move peek to current)
-            // self.next_token(); // Consume the operator, it's now current_token
-            let op = token_to_binary_op(&self.current_token).unwrap();
-            let current_precedence = precedence(&self.current_token);
+                    let right = self.parse_expression(current_precedence)?;
+                    left = Expression::BinaryOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                }
+                // Function Call: If current token is '(', assume 'left' was the function name
+                // This requires 'left' to have been parsed as an identifier (Variable node).
+                Token::LParen => {
+                    // Ensure 'left' was a variable expression
+                    let func_name = match left {
+                        Expression::Variable(name) => name,
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "Function name before '('".to_string(),
+                                found: Token::LParen, // Or report the node type of 'left'
+                            });
+                        }
+                    };
 
-            self.next_token(); // Consume the operator token, move to start of RHS
-
-            let right = self.parse_expression(current_precedence)?; // Parse RHS
-
-            left = Expression::BinaryOp {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        } // Loop continues based on peek_token
+                    self.next_token(); // Consume '('
+                    let args = self.parse_argument_list()?; // Expects ')' inside
+                    left = Expression::FunctionCall {
+                        name: func_name,
+                        args,
+                    };
+                }
+                // No more operators or calls relevant at this precedence level
+                _ => break,
+            }
+        } // End loop
 
         Ok(left)
     }
 
     // Parses prefix elements: literals, identifiers, grouped expressions
     fn parse_prefix(&mut self) -> ParseResult<Expression> {
-        // Decide what kind of prefix element it is based on current_token
         match self.current_token.clone() {
-            // Clone for matching
             Token::Number(value) => {
-                self.next_token(); // Consume the number token
+                self.next_token();
                 Ok(Expression::NumberLiteral(value))
             }
             Token::Identifier(name) => {
-                self.next_token(); // Consume the identifier token
+                // This could be a variable OR the start of a function call.
+                // We parse it as a Variable here. The '(' check in parse_expression's loop handles calls.
+                self.next_token();
                 Ok(Expression::Variable(name))
             }
             Token::LParen => {
-                // Delegate, DO NOT consume LParen here.
-                // parse_grouped_expression handles consuming the matching RParen.
-                self.next_token(); // Consume the '(' BEFORE calling the helper
-                self.parse_grouped_expression() // Returns result, current_token is after ')'
+                self.next_token(); // Consume '('
+                self.parse_grouped_expression()
             }
-            // Add unary operators later (e.g., Token::Minus => ...)
             _ => Err(ParseError::UnexpectedToken {
                 expected: "number, identifier, or '('".to_string(),
                 found: self.current_token.clone(),
             }),
         }
-        // REMOVE the blanket self.next_token() call from here
     }
 
     fn parse_grouped_expression(&mut self) -> ParseResult<Expression> {
@@ -240,6 +345,31 @@ impl<'a> Parser<'a> {
         self.expect_and_consume(Token::RParen)?; // Handles check and consumption
 
         Ok(expr)
+    }
+
+    // Helper to parse EXPRESSION [, EXPRESSION]* within parentheses for function calls
+    fn parse_argument_list(&mut self) -> ParseResult<Vec<Expression>> {
+        let mut args = Vec::new();
+
+        // Handle empty arg list: foo()
+        if self.current_token == Token::RParen {
+            self.next_token(); // Consume ')'
+            return Ok(args);
+        }
+
+        // Parse first argument expression
+        args.push(self.parse_expression(0)?);
+
+        // Parse subsequent arguments (comma followed by expression)
+        while self.current_token == Token::Comma {
+            self.next_token(); // Consume ','
+            args.push(self.parse_expression(0)?);
+        }
+
+        // Expect closing ')'
+        self.expect_and_consume(Token::RParen)?;
+
+        Ok(args)
     }
 
     // `parse_let_expression` is removed, replaced by `parse_let_statement`
@@ -410,5 +540,129 @@ mod tests {
         let expected_expr = bin_op(Multiply, bin_op(Add, num(1.0), num(2.0)), num(3.0));
         assert_eq!(program.statements[0], expr_stmt(expected_expr));
         assert_eq!(parser.current_token, Token::Eof);
+    }
+
+    // function tests
+
+    #[test]
+    fn test_parse_function_definition_no_params() {
+        let input = "fun main() { 5; }";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::FunctionDef { name, params, body } => {
+                assert_eq!(name, "main");
+                assert!(params.is_empty());
+                assert_eq!(body.statements.len(), 1);
+                assert_eq!(body.statements[0], expr_stmt(num(5.0)));
+            }
+            _ => panic!("Expected FunctionDef statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_definition_with_params() {
+        let input = "fun add(a, b) { let result = a + b; result; }";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::FunctionDef { name, params, body } => {
+                assert_eq!(name, "add");
+                assert_eq!(params, &["a".to_string(), "b".to_string()]);
+                assert_eq!(body.statements.len(), 2);
+                assert_eq!(
+                    body.statements[0],
+                    let_stmt("result", bin_op(Add, var("a"), var("b")))
+                );
+                assert_eq!(body.statements[1], expr_stmt(var("result")));
+            }
+            _ => panic!("Expected FunctionDef statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_call_no_args() {
+        let input = "my_func();";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ExpressionStmt(Expression::FunctionCall { name, args }) => {
+                assert_eq!(name, "my_func");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected FunctionCall expression statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_function_call_with_args() {
+        let input = "add(1, 2 * 3);";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ExpressionStmt(Expression::FunctionCall { name, args }) => {
+                assert_eq!(name, "add");
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], num(1.0));
+                assert_eq!(args[1], bin_op(Multiply, num(2.0), num(3.0)));
+            }
+            _ => panic!("Expected FunctionCall expression statement"),
+        }
+    }
+
+    #[test]
+    fn test_call_inside_expression() {
+        let input = "1 + compute(x, 5);";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(program.statements.len(), 1);
+        let expected_call = Expression::FunctionCall {
+            name: "compute".to_string(),
+            args: vec![var("x"), num(5.0)],
+        };
+        assert_eq!(
+            program.statements[0],
+            expr_stmt(bin_op(Add, num(1.0), expected_call))
+        );
+    }
+
+    #[test]
+    fn test_program_with_fun_and_call() {
+        let input = r#"
+             fun double(n) { n * 2; }
+             let num = 10;
+             double(num + 5);
+         "#;
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+
+        assert_eq!(program.statements.len(), 3);
+        assert!(matches!(
+            program.statements[0],
+            Statement::FunctionDef { .. }
+        ));
+        assert!(matches!(
+            program.statements[1],
+            Statement::LetBinding { .. }
+        ));
+        assert!(matches!(
+            program.statements[2],
+            Statement::ExpressionStmt(Expression::FunctionCall { .. })
+        ));
     }
 }

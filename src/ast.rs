@@ -1,26 +1,27 @@
 // src/ast.rs
-
 pub type NumberType = f64;
 
-// Program is now a list of statements
+// Program is still a list of statements
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
     pub statements: Vec<Statement>,
 }
 
-// Represents different kinds of statements
 #[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
-    // Example: let x = 5 * 2;
     LetBinding {
         name: String,
-        value: Expression, // Keep value as Expression
+        value: Expression,
     },
-    // Example: x + 1; (Evaluated for value, potentially for side effects later)
     ExpressionStmt(Expression),
+    // Added: Represents 'fun name(params...) { body }'
+    FunctionDef {
+        name: String,        // Function name
+        params: Vec<String>, // Parameter names
+        body: Box<Program>, // Use Box<Program> for recursive structure, body is a sequence of stmts
+    },
 }
 
-// Expressions remain largely the same, but Let is removed from here
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
     NumberLiteral(NumberType),
@@ -30,7 +31,11 @@ pub enum Expression {
         left: Box<Expression>,
         right: Box<Expression>,
     },
-    // Let { ... } // Removed from Expression enum
+    // Added: Represents 'func_name(arg1, arg2, ...)'
+    FunctionCall {
+        name: String,          // Function name being called
+        args: Vec<Expression>, // Argument expressions
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]

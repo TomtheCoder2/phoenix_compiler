@@ -35,17 +35,30 @@ impl<'a> Lexer<'a> {
             Some('+') => Token::Plus,
             Some('-') => Token::Minus,
             Some('*') => Token::Star,
-            Some('/') => Token::Slash,
+            Some('/') if self.peek_char == Some('/') => {
+                // Handle comments
+                while let Some(next_ch) = self.peek_char {
+                    if next_ch == '\n' {
+                        break; // End of comment
+                    }
+                    self.advance(); // Consume comment char
+                }
+                self.advance(); // Move to next char after comment
+                return self.next_token(); // Recurse to get next token
+            }
             Some('(') => Token::LParen,
             Some(')') => Token::RParen,
-            Some(';') => Token::Semicolon, // Added
+            Some(';') => Token::Semicolon,
+            Some(',') => Token::Comma,  // Added
+            Some('{') => Token::LBrace, // Added
+            Some('}') => Token::RBrace, // Added
 
             Some(ch) if is_identifier_start(ch) => {
                 let ident = self.read_identifier();
-                // Check keywords
                 return match ident.as_str() {
+                    // Return directly
                     "let" => Token::Let,
-                    // "in" => Token::In, // Removed
+                    "fun" => Token::Fun, // Added
                     _ => Token::Identifier(ident),
                 };
             }
@@ -54,7 +67,7 @@ impl<'a> Lexer<'a> {
                 if ch.is_digit(10)
                     || (ch == '.' && self.peek_char.map_or(false, |pc| pc.is_digit(10))) =>
             {
-                return self.read_number();
+                return self.read_number(); // Return directly
             }
 
             Some(ch) => Token::Illegal(ch),
@@ -198,5 +211,54 @@ mod tests {
         let input = " . ";
         let mut lexer = Lexer::new(input);
         assert_eq!(lexer.next_token(), Token::Illegal('.'));
+    }
+
+    #[test]
+    fn test_function_tokens() {
+        let input = "fun add(a, b) { a + b; }";
+        let mut lexer = Lexer::new(input);
+        let tokens = vec![
+            Token::Fun,
+            Token::Identifier("add".to_string()),
+            Token::LParen,
+            Token::Identifier("a".to_string()),
+            Token::Comma,
+            Token::Identifier("b".to_string()),
+            Token::RParen,
+            Token::LBrace,
+            Token::Identifier("a".to_string()),
+            Token::Plus,
+            Token::Identifier("b".to_string()),
+            Token::Semicolon,
+            Token::RBrace,
+            Token::Eof,
+        ];
+        for expected in tokens {
+            assert_eq!(lexer.next_token(), expected);
+        }
+    }
+
+    #[test]
+    fn test_comments() {
+        let input = "let x = 10; // This is a comment\nlet y = x + 5;";
+        let mut lexer = Lexer::new(input);
+        let tokens = vec![
+            Token::Let,
+            Token::Identifier("x".to_string()),
+            Token::Assign,
+            Token::Number(10.0),
+            Token::Semicolon,
+            Token::Let,
+            Token::Identifier("y".to_string()),
+            Token::Assign,
+            Token::Identifier("x".to_string()),
+            Token::Plus,
+            Token::Number(5.0),
+            Token::Semicolon,
+            Token::Eof,
+        ];
+        for expected in tokens {
+            assert_eq!(lexer.next_token(), expected);
+        }
     }
 }

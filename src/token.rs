@@ -19,11 +19,14 @@ pub enum Token {
     // Delimiters
     LParen,      // '('
     RParen,      // ')'
-    Semicolon,   // ';' // Added
+    Semicolon,   // ';'
+    Comma,       // ',' // Added
+    LBrace,      // '{' // Added
+    RBrace,      // '}' // Added
 
     // Keywords
     Let,         // 'let'
-    // In,       // 'in' // Removed (or keep for future functional constructs?) Let's remove for now.
+    Fun,         // 'fun' // Added
 
     // Identifiers
     Identifier(String), // e.g., "my_variable"
