@@ -38,26 +38,23 @@ impl<'a> Lexer<'a> {
             Some('/') => Token::Slash,
             Some('(') => Token::LParen,
             Some(')') => Token::RParen,
+            Some(';') => Token::Semicolon, // Added
 
             Some(ch) if is_identifier_start(ch) => {
-                // If it starts like an identifier, read the whole thing
                 let ident = self.read_identifier();
-                // Check if it's a keyword
+                // Check keywords
                 return match ident.as_str() {
-                    // Return directly as read_identifier consumes chars
                     "let" => Token::Let,
-                    "in" => Token::In,
-                    _ => Token::Identifier(ident), // Otherwise, it's a user identifier
+                    // "in" => Token::In, // Removed
+                    _ => Token::Identifier(ident),
                 };
             }
 
             Some(ch)
-                if ch.is_ascii_digit()
+                if ch.is_digit(10)
                     || (ch == '.' && self.peek_char.map_or(false, |pc| pc.is_digit(10))) =>
             {
-                // Handle '.' only if followed by a digit (peek ahead)
-                // Example: ".5" is Number(0.5), but "." is not handled here yet.
-                return self.read_number(); // Return directly
+                return self.read_number();
             }
 
             Some(ch) => Token::Illegal(ch),
@@ -144,24 +141,27 @@ mod tests {
     use crate::token::Token;
 
     #[test]
-    fn test_let_in_identifier() {
-        let input = "let result = value1 in result * 2";
+    fn test_let_sequence() {
+        let input = "let x = 10; let y = x + 5;";
         let mut lexer = Lexer::new(input);
         let tokens = vec![
             Token::Let,
-            Token::Identifier("result".to_string()),
+            Token::Identifier("x".to_string()),
             Token::Assign,
-            Token::Identifier("value1".to_string()),
-            Token::In,
-            Token::Identifier("result".to_string()),
-            Token::Star,
-            Token::Number(2.0),
+            Token::Number(10.0),
+            Token::Semicolon,
+            Token::Let,
+            Token::Identifier("y".to_string()),
+            Token::Assign,
+            Token::Identifier("x".to_string()),
+            Token::Plus,
+            Token::Number(5.0),
+            Token::Semicolon,
             Token::Eof,
         ];
 
         for expected_token in tokens {
             let actual_token = lexer.next_token();
-            // println!("Expected: {:?}, Got: {:?}", expected_token, actual_token); // Debug print
             assert_eq!(actual_token, expected_token);
         }
     }

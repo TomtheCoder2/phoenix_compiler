@@ -14,16 +14,17 @@ pub enum Token {
     Minus,       // '-'
     Star,        // '*'
     Slash,       // '/'
-    Assign,      // '=' // Added
+    Assign,      // '='
 
     // Delimiters
     LParen,      // '('
     RParen,      // ')'
+    Semicolon,   // ';' // Added
 
     // Keywords
-    Let,         // 'let' // Added
-    In,          // 'in'  // Added
+    Let,         // 'let'
+    // In,       // 'in' // Removed (or keep for future functional constructs?) Let's remove for now.
 
     // Identifiers
-    Identifier(String), // e.g., "my_variable" // Added
+    Identifier(String), // e.g., "my_variable"
 }

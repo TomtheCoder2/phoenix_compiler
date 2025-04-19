@@ -1,47 +1,39 @@
 // src/codegen.rs
 
-use crate::ast::{BinaryOperator, Expression};
+use crate::ast::{BinaryOperator, Expression, Program, Statement};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-// Added PointerType
-use inkwell::values::{AnyValue, FloatValue, FunctionValue, PointerValue};
-// Added PointerValue
+use inkwell::values::{AnyValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
+// Added BasicValueEnum
 use std::collections::HashMap;
 use std::fmt;
-// Use HashMap for symbol table
 
-// --- CompileResult and CodeGenError remain similar ---
-// Add error variant for undefined variable
+// --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodeGenError {
     InvalidAstNode(String),
     LlvmError(String),
-    UnknownOperator(BinaryOperator),
-    UndefinedVariable(String), // Added
+    // UnknownOperator(BinaryOperator), // Covered by expression compilation
+    UndefinedVariable(String),
+    // Maybe add specific errors for codegen issues
 }
-
 impl fmt::Display for CodeGenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CodeGenError::InvalidAstNode(msg) => write!(f, "Invalid AST Node: {}", msg),
             CodeGenError::LlvmError(msg) => write!(f, "LLVM Error: {}", msg),
-            CodeGenError::UnknownOperator(op) => write!(f, "Unknown binary operator: {:?}", op),
             CodeGenError::UndefinedVariable(name) => write!(f, "Undefined variable: {}", name),
         }
     }
 }
-type CompileResult<'ctx> = Result<FloatValue<'ctx>, CodeGenError>;
+type CompileResult<'ctx, T> = Result<T, CodeGenError>; // Generic result
 
 pub struct Compiler<'a, 'ctx> {
     context: &'ctx Context,
     builder: &'a Builder<'ctx>,
     module: &'a Module<'ctx>,
-    // fpm: &'a PassManager<FunctionValue<'ctx>>, // Optimization passes manager
-
-    // Symbol Table: Map variable names (String) to their memory location (PointerValue)
-    variables: HashMap<String, PointerValue<'ctx>>,
-    // Keep track of the function currently being built is useful for allocas
+    variables: HashMap<String, PointerValue<'ctx>>, // Symbol table persists across statements
     current_function: Option<FunctionValue<'ctx>>,
 }
 
@@ -50,15 +42,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         context: &'ctx Context,
         builder: &'a Builder<'ctx>,
         module: &'a Module<'ctx>,
-        // fpm: &'a PassManager<FunctionValue<'ctx>>,
     ) -> Self {
         Compiler {
             context,
             builder,
             module,
-            // fpm,
-            variables: HashMap::new(), // Initialize empty symbol table
-            current_function: None,    // No function initially
+            variables: HashMap::new(),
+            current_function: None,
         }
     }
 
@@ -84,127 +74,150 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         temp_builder.build_alloca(f64_type, name).unwrap()
     }
 
-    /// Compiles an AST Expression node into an LLVM FloatValue
-    fn compile_expr(&mut self, expr: &Expression) -> CompileResult<'ctx> {
+    /// Compiles a single Expression node (used by statements)
+    /// Returns a FloatValue representing the result of the expression.
+    fn compile_expression(&mut self, expr: &Expression) -> CompileResult<'ctx, FloatValue<'ctx>> {
         match expr {
             Expression::NumberLiteral(value) => {
                 let f64_type = self.context.f64_type();
                 Ok(f64_type.const_float(*value))
             }
-
             Expression::Variable(name) => {
                 match self.variables.get(name) {
                     Some(var_ptr) => {
-                        // Load the value from the variable's memory location
                         let f64_type = self.context.f64_type();
-                        let loaded_val = self.builder.build_load(f64_type, *var_ptr, name);
-                        if let Err(e) = loaded_val {
-                            return Err(CodeGenError::LlvmError(format!(
-                                "Failed to load variable '{}': {}",
+                        // build_load now returns BasicValueEnum wrapped in Result
+                        let loaded_val_result = self.builder.build_load(f64_type, *var_ptr, name);
+                        match loaded_val_result {
+                            Ok(BasicValueEnum::FloatValue(fv)) => Ok(fv),
+                            Ok(_) => Err(CodeGenError::LlvmError(format!(
+                                "Expected FloatValue from load for var '{}'",
+                                name
+                            ))),
+                            Err(e) => Err(CodeGenError::LlvmError(format!(
+                                "LLVM build_load error for var '{}': {}",
                                 name, e
-                            )));
+                            ))),
                         }
-                        // has to be non-null
-                        let loaded_val = loaded_val.unwrap();
-                        // build_load returns Result<BasicValueEnum, String>, we need FloatValue
-                        // Assuming it loads correctly and is a float value
-                        Ok(loaded_val.into_float_value())
                     }
                     None => Err(CodeGenError::UndefinedVariable(name.clone())),
                 }
             }
-
             Expression::BinaryOp { op, left, right } => {
-                let lhs = self.compile_expr(left)?;
-                let rhs = self.compile_expr(right)?;
-
+                let lhs = self.compile_expression(left)?;
+                let rhs = self.compile_expression(right)?;
                 match match op {
                     BinaryOperator::Add => self.builder.build_float_add(lhs, rhs, "addtmp"),
                     BinaryOperator::Subtract => self.builder.build_float_sub(lhs, rhs, "subtmp"),
                     BinaryOperator::Multiply => self.builder.build_float_mul(lhs, rhs, "multmp"),
                     BinaryOperator::Divide => self.builder.build_float_div(lhs, rhs, "divtmp"),
-                    // Note: We might add comparison operators later which return i1 (bool)
-                    // _ => Err(CodeGenError::UnknownOperator(*op)), // Handle if necessary
                 } {
-                    Ok(fv) => Ok(fv),
-                    Err(e) => CompileResult::Err(CodeGenError::LlvmError(e.to_string())),
+                    Ok(value) => Ok(value),
+                    Err(e) => {
+                        // Handle potential LLVM errors
+                        Err(CodeGenError::LlvmError(format!(
+                            "LLVM error during binary operation: {}",
+                            e
+                        )))
+                    }
                 }
-            }
-
-            Expression::Let { name, value, body } => {
-                // 1. Compile the value expression
-                let compiled_value = self.compile_expr(value)?;
-
-                // 2. Allocate memory (alloca) for the variable in the function entry block
-                let alloca = self.create_entry_block_alloca(name);
-
-                // 3. Store the compiled value into the allocated memory
-                self.builder.build_store(alloca, compiled_value);
-
-                // --- Scoping ---
-                // 4. Temporarily bind the variable name to its alloca in the symbol table.
-                //    Handle potential shadowing: store old value if exists.
-                let old_binding = self.variables.insert(name.clone(), alloca);
-
-                // 5. Compile the body expression. The variable 'name' is now visible.
-                let body_result = self.compile_expr(body); // Result<FloatValue, Error>
-
-                // 6. Restore the symbol table: Remove the binding or restore the old one.
-                if let Some(old_ptr) = old_binding {
-                    self.variables.insert(name.clone(), old_ptr); // Restore shadowed variable
-                } else {
-                    self.variables.remove(name); // Remove if it wasn't shadowing
-                }
-                // --- End Scoping ---
-
-                // 7. Return the result of compiling the body
-                body_result
             }
         }
     }
 
-    // Compile the top-level expression into a main function
-    pub fn compile(&mut self, ast: &Expression) -> Result<FunctionValue<'ctx>, CodeGenError> {
+    /// Compiles a single Statement node.
+    /// Returns Ok(Some(FloatValue)) if it's an ExpressionStmt, Ok(None) for LetBinding, Err on failure.
+    fn compile_statement(
+        &mut self,
+        stmt: &Statement,
+    ) -> CompileResult<'ctx, Option<FloatValue<'ctx>>> {
+        match stmt {
+            Statement::LetBinding { name, value } => {
+                // Compile the value expression first
+                let compiled_value = self.compile_expression(value)?;
+
+                // Check if variable already exists (for shadowing or reassignment later)
+                let alloca = if let Some(existing_alloca) = self.variables.get(name) {
+                    // Variable already exists (shadowing in current scope, or reassignment if mutable)
+                    // For now, we just reuse the allocation. If we add proper scopes/mutability,
+                    // this logic needs refinement.
+                    *existing_alloca
+                } else {
+                    // Allocate memory for the new variable
+                    let new_alloca = self.create_entry_block_alloca(name);
+                    self.variables.insert(name.clone(), new_alloca); // Add to symbol table
+                    new_alloca
+                };
+
+                // Store the compiled value into the allocated memory
+                self.builder.build_store(alloca, compiled_value);
+
+                // Let statements don't produce a value themselves in this model
+                Ok(None)
+            }
+
+            Statement::ExpressionStmt(expr) => {
+                // Compile the expression
+                let expr_value = self.compile_expression(expr)?;
+                // This statement *does* produce a value
+                Ok(Some(expr_value))
+            }
+        }
+    }
+
+    /// Compiles the entire Program (list of statements) into an LLVM function.
+    /// The function will return the value of the *last* ExpressionStmt encountered.
+    pub fn compile_program(
+        &mut self,
+        program: &Program,
+    ) -> Result<FunctionValue<'ctx>, CodeGenError> {
         let f64_type = self.context.f64_type();
         let fn_type = f64_type.fn_type(&[], false);
         let function = self.module.add_function("main", fn_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
 
         self.builder.position_at_end(basic_block);
-        self.current_function = Some(function); // Set the current function
+        self.current_function = Some(function);
+        self.variables.clear(); // Clear variables for this compilation unit
 
-        // Clear variables map for this function compilation
-        self.variables.clear();
+        let mut last_expr_value: Option<FloatValue<'ctx>> = None;
 
-        // Compile the main expression body
-        let body = match self.compile_expr(ast) {
-            Ok(val) => val,
-            Err(e) => {
-                // If compilation fails, it's good practice to delete the potentially malformed function
-                unsafe {
-                    function.delete();
+        // Compile statements one by one
+        for stmt in &program.statements {
+            match self.compile_statement(stmt) {
+                Ok(Some(value)) => last_expr_value = Some(value), // Capture value from ExpressionStmt
+                Ok(None) => {} // LetBinding doesn't change the last value
+                Err(e) => {
+                    // Error during statement compilation: cleanup and return error
+                    unsafe {
+                        function.delete();
+                    }
+                    self.current_function = None;
+                    return Err(e);
                 }
-                self.current_function = None;
-                return Err(e);
             }
-        };
+        }
 
         // Build the return instruction
-        self.builder.build_return(Some(&body));
+        if let Some(return_value) = last_expr_value {
+            self.builder.build_return(Some(&return_value));
+        } else {
+            // No expression statement found, or program was empty. Return 0.0? Or error?
+            // Let's return 0.0 for now. Could also make main return void.
+            self.builder.build_return(Some(&f64_type.const_float(0.0)));
+        }
 
-        // Reset current function
         self.current_function = None;
 
-        // Verify the function
+        // Verify
         if function.verify(true) {
             Ok(function)
         } else {
             eprintln!(
-                "Invalid function generated (potentially due to error during build):\n{}",
+                "Invalid function generated (verify failed):\n{}",
                 function.print_to_string().to_string()
             );
-            // Consider deleting the function if verification fails after successful compilation?
-            // unsafe { function.delete(); }
+            // unsafe { function.delete(); } // Optionally delete malformed function
             Err(CodeGenError::LlvmError(
                 "Function verification failed".to_string(),
             ))
