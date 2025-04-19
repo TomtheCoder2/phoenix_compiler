@@ -24,14 +24,14 @@ type MainFuncSignature = unsafe extern "C" fn() -> f64;
 
 fn main() {
     let input = r#"
-        fun multiply(a, b) {
-            let result = a * b; // Define local var in func
-            result;             // Last expr is return value
+        fun calculate(a, b) {
+            let x = a + 1.0; // Intermediate var x
+            let y = b + 2.0; // Intermediate var y
+            let z = x * y;   // Intermediate var z
+            z - a;           // Return value uses z and a
         }
 
-        let x = 10.0;
-        let y = 5.0;
-        multiply(x, y + 2.0); // Call the function: 10.0 * (5.0 + 2.0) = 70.0
+        calculate(5.0, 10.0); // Expected: ((5+1)*(10+2)) - 5 = (6*12)-5 = 72-5 = 67.0
     "#;
     // Try: "fun id(x) { x; } id(123);" -> 123.0
     // Try: "fun adder(a,b,c) {a+b+c;} adder(1,2,3);" -> 6.0
@@ -84,7 +84,7 @@ fn main() {
     inkwell::targets::Target::initialize_native(&inkwell::targets::InitializationConfig::default())
         .expect("Failed to initialize native target");
     let execution_engine = module
-        .create_jit_execution_engine(OptimizationLevel::None)
+        .create_jit_execution_engine(OptimizationLevel::Default)
         .expect("Failed to create Execution Engine");
     let main_func_jit: JitFunction<MainFuncSignature> =
         unsafe { execution_engine.get_function("main") }

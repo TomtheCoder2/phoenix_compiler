@@ -4,13 +4,13 @@ use crate::ast::{BinaryOperator, Expression, Program, Statement};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-// Added BasicValueEnum
 use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::values::{AnyValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
+// Added BasicValueEnum
+use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::fmt;
-use inkwell::OptimizationLevel;
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +241,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
     /// Compiles a single Statement node.
     /// Returns Ok(Some(FloatValue)) if it's an ExpressionStmt, Ok(None) for LetBinding, Err on failure.
+    /// Compiles a single Statement node. Now runs FPM on function definitions.
     fn compile_statement(
         &mut self,
         stmt: &Statement,
@@ -250,79 +251,67 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // Compile the value expression first
                 let compiled_value = self.compile_expression(value)?;
 
-                // Check if variable already exists (for shadowing or reassignment later)
+                // Check if variable already exists
                 let alloca = if let Some(existing_alloca) = self.variables.get(name) {
-                    // Variable already exists (shadowing in current scope, or reassignment if mutable)
-                    // For now, we just reuse the allocation. If we add proper scopes/mutability,
-                    // this logic needs refinement.
                     *existing_alloca
                 } else {
                     // Allocate memory for the new variable
                     let new_alloca = self.create_entry_block_alloca(name);
-                    self.variables.insert(name.clone(), new_alloca); // Add to symbol table
+                    self.variables.insert(name.clone(), new_alloca);
                     new_alloca
                 };
 
                 // Store the compiled value into the allocated memory
                 self.builder.build_store(alloca, compiled_value);
 
-                // Let statements don't produce a value themselves in this model
                 Ok(None)
             }
 
             Statement::ExpressionStmt(expr) => {
                 // Compile the expression
                 let expr_value = self.compile_expression(expr)?;
-                // This statement *does* produce a value
                 Ok(Some(expr_value))
             }
 
-            // --- Handle Function Definitions ---
             Statement::FunctionDef { name, params, body } => {
                 // Check for redefinition
                 if self.functions.contains_key(name) {
                     return Err(CodeGenError::FunctionRedefinition(name.clone()));
                 }
 
-                // --- Define Function Type ---
+                // Define Function Type
                 let f64_type = self.context.f64_type();
-                // Create a vector of f64 types for parameters
                 let param_types: Vec<BasicMetadataTypeEnum> = std::iter::repeat(f64_type.into())
                     .take(params.len())
                     .collect();
-                let fn_type = f64_type.fn_type(&param_types, false); // f64(f64, f64, ...)
+                let fn_type = f64_type.fn_type(&param_types, false);
 
-                // --- Create LLVM Function ---
+                // Create LLVM Function
                 let function = self.module.add_function(name, fn_type, None);
 
-                // --- Store Function Value ---
-                // Store *before* compiling body in case of recursion (though not fully supported yet)
+                // Store Function Value before compiling body for possible recursion
                 self.functions.insert(name.clone(), function);
 
-                // --- Setup Function Body Context ---
+                // Setup Function Body Context
                 let entry_block = self.context.append_basic_block(function, "entry");
-                let original_builder_pos = self.builder.get_insert_block(); // Save current position
+                let original_builder_pos = self.builder.get_insert_block();
                 let original_func = self.current_function;
-                let original_vars = self.variables.clone(); // Save current variables
+                let original_vars = self.variables.clone();
 
-                self.builder.position_at_end(entry_block); // Move builder to new function
+                self.builder.position_at_end(entry_block);
                 self.current_function = Some(function);
-                self.variables.clear(); // Use fresh variables map for function scope
+                self.variables.clear();
 
-                // --- Allocate and Store Parameters ---
+                // Allocate and Store Parameters
                 for (i, param_name) in params.iter().enumerate() {
                     let llvm_param = function.get_nth_param(i as u32).unwrap();
-                    llvm_param.set_name(param_name); // Set name in IR
-
-                    // Allocate space for the parameter on the stack
+                    llvm_param.set_name(param_name);
                     let param_alloca = self.create_entry_block_alloca(param_name);
-                    // Store the incoming parameter value into its stack slot
                     self.builder.build_store(param_alloca, llvm_param);
-                    // Add the parameter to the function's local variables map
                     self.variables.insert(param_name.clone(), param_alloca);
                 }
 
-                // --- Compile Function Body Statements ---
+                // Compile Function Body Statements
                 let mut last_body_val: Option<FloatValue<'ctx>> = None;
                 let mut body_compile_err: Option<CodeGenError> = None;
 
@@ -332,13 +321,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         Ok(None) => {}
                         Err(e) => {
                             body_compile_err = Some(e);
-                            break; // Stop compiling body on error
+                            break;
                         }
                     }
                 }
 
-                // --- Build Return ---
-                // Only build return if body compilation didn't fail
+                // Build Return
                 if body_compile_err.is_none() {
                     if let Some(ret_val) = last_body_val {
                         self.builder.build_return(Some(&ret_val));
@@ -348,104 +336,168 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     }
                 }
 
-                // --- Restore Outer Context ---
-                self.variables = original_vars; // Restore caller's variables
-                self.current_function = original_func;
-                if let Some(original_block) = original_builder_pos {
-                    self.builder.position_at_end(original_block); // Restore builder position
-                } else {
-                    // Handle case where builder wasn't positioned before (e.g., first function)
-                    // Maybe self.builder.clear_insertion_position(); ? Or leave it?
-                }
-
-                // --- Handle Body Compilation Error ---
+                // Handle Body Compilation Error (before running passes)
                 if let Some(err) = body_compile_err {
-                    // Function definition itself failed, remove from map and module?
+                    // Restore context before deleting
+                    self.variables = original_vars;
+                    self.current_function = original_func;
+                    if let Some(bb) = original_builder_pos {
+                        self.builder.position_at_end(bb);
+                    }
+
                     self.functions.remove(name);
                     unsafe {
                         function.delete();
-                    } // Delete potentially malformed function
+                    }
                     return Err(err);
                 }
 
-                // --- Verification ---
-                if function.verify(true) {
-                    // Function definition doesn't produce a "value" for the outer scope
-                    Ok(None)
-                } else {
+                // Verify before optimizing
+                if !function.verify(true) {
                     eprintln!(
-                        "Invalid function generated '{}':\n{}",
+                        "Invalid function generated '{}' BEFORE optimization:\n{}",
                         name,
                         function.print_to_string().to_string()
                     );
-                    self.functions.remove(name); // Remove bad function from our map
+
+                    // Restore context
+                    self.variables = original_vars;
+                    self.current_function = original_func;
+                    if let Some(bb) = original_builder_pos {
+                        self.builder.position_at_end(bb);
+                    }
+
+                    self.functions.remove(name);
                     unsafe {
                         function.delete();
-                    } // Delete from module
-                    Err(CodeGenError::LlvmError(format!(
-                        "Function '{}' verification failed",
+                    }
+                    return Err(CodeGenError::LlvmError(format!(
+                        "Function '{}' verification failed before optimization",
                         name
-                    )))
+                    )));
                 }
-            } // End FunctionDef
+
+                // Run the registered passes on the generated function
+                let changed = self.fpm.run_on(&function);
+                if changed {
+                    println!("Optimizer changed function '{}'", name);
+                }
+
+                // Restore Outer Context (AFTER passes)
+                self.variables = original_vars;
+                self.current_function = original_func;
+                if let Some(original_block) = original_builder_pos {
+                    self.builder.position_at_end(original_block);
+                }
+
+                // Re-verify after optimization
+                if function.verify(true) {
+                    Ok(None) // Function definition successful
+                } else {
+                    eprintln!(
+                        "Invalid function generated '{}' AFTER optimization:\n{}",
+                        name,
+                        function.print_to_string().to_string()
+                    );
+                    self.functions.remove(name);
+                    unsafe {
+                        function.delete();
+                    }
+                    return Err(CodeGenError::LlvmError(format!(
+                        "Function '{}' verification failed after optimization",
+                        name
+                    )));
+                }
+            }
         }
     }
 
-    /// Compiles the entire Program (list of statements) into an LLVM function.
-    /// The function will return the value of the *last* ExpressionStmt encountered.
     pub fn compile_program(
         &mut self,
         program: &Program,
     ) -> Result<FunctionValue<'ctx>, CodeGenError> {
+        // Setup Main Function
         let f64_type = self.context.f64_type();
-        let fn_type = f64_type.fn_type(&[], false);
-        let function = self.module.add_function("main", fn_type, None);
-        let basic_block = self.context.append_basic_block(function, "entry");
+        let main_fn_type = f64_type.fn_type(&[], false);
+        let main_function = self.module.add_function("main", main_fn_type, None);
+        let entry_block = self.context.append_basic_block(main_function, "entry");
 
-        self.builder.position_at_end(basic_block);
-        self.current_function = Some(function);
-        self.variables.clear(); // Clear variables for this compilation unit
+        // Save Compiler State
+        let original_builder_pos = self.builder.get_insert_block();
+        let original_func = self.current_function;
+        let original_vars = self.variables.clone();
 
-        let mut last_expr_value: Option<FloatValue<'ctx>> = None;
+        self.builder.position_at_end(entry_block);
+        self.current_function = Some(main_function);
+        self.variables.clear();
 
-        // Compile statements one by one
+        // Compile Top-Level Statements
+        let mut last_main_expr_value: Option<FloatValue<'ctx>> = None;
+
         for stmt in &program.statements {
             match self.compile_statement(stmt) {
-                Ok(Some(value)) => last_expr_value = Some(value), // Capture value from ExpressionStmt
-                Ok(None) => {} // LetBinding doesn't change the last value
+                Ok(Some(value)) => last_main_expr_value = Some(value),
+                Ok(None) => {}
                 Err(e) => {
-                    // Error during statement compilation: cleanup and return error
-                    unsafe {
-                        function.delete();
+                    // Restore state before returning error
+                    self.variables = original_vars;
+                    self.current_function = original_func;
+                    if let Some(bb) = original_builder_pos {
+                        self.builder.position_at_end(bb);
                     }
-                    self.current_function = None;
+                    unsafe {
+                        main_function.delete();
+                    }
                     return Err(e);
                 }
             }
         }
 
-        // Build the return instruction
-        if let Some(return_value) = last_expr_value {
+        // Build Return for Main
+        if let Some(return_value) = last_main_expr_value {
             self.builder.build_return(Some(&return_value));
         } else {
-            // No expression statement found, or program was empty. Return 0.0? Or error?
-            // Let's return 0.0 for now. Could also make main return void.
             self.builder.build_return(Some(&f64_type.const_float(0.0)));
         }
 
-        self.current_function = None;
+        // Restore Compiler State (before optimizing main)
+        self.variables = original_vars;
+        self.current_function = original_func;
+        if let Some(bb) = original_builder_pos {
+            self.builder.position_at_end(bb);
+        }
 
-        // Verify
-        if function.verify(true) {
-            Ok(function)
+        // Optionally Optimize main()
+        if main_function.verify(true) {
+            let changed = self.fpm.run_on(&main_function);
+            if changed {
+                println!("Optimizer changed function 'main'");
+            }
+
+            // Re-verify after optimizing main
+            if !main_function.verify(true) {
+                eprintln!(
+                    "Invalid main function after optimization:\n{}",
+                    main_function.print_to_string().to_string()
+                );
+                unsafe {
+                    main_function.delete();
+                }
+                return Err(CodeGenError::LlvmError(
+                    "Main function verification failed after optimization".to_string(),
+                ));
+            }
+            Ok(main_function) // Return optimized main
         } else {
             eprintln!(
-                "Invalid function generated (verify failed):\n{}",
-                function.print_to_string().to_string()
+                "Invalid main function before optimization:\n{}",
+                main_function.print_to_string().to_string()
             );
-            // unsafe { function.delete(); } // Optionally delete malformed function
+            unsafe {
+                main_function.delete();
+            }
             Err(CodeGenError::LlvmError(
-                "Function verification failed".to_string(),
+                "Main function verification failed before optimization".to_string(),
             ))
         }
     }
