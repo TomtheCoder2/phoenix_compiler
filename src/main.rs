@@ -116,9 +116,6 @@ fn link_object_file(obj_path: &Path, executable_name: &str) {
     match status {
         Ok(exit_status) if exit_status.success() => {
             println!("Successfully linked executable: {}", executable_name);
-            println!(
-                "NOTE: Running this executable might not work as expected due to non-standard main signature."
-            );
             println!("You can inspect it with: file {}", executable_name);
             // To run (might crash/print garbage): ./{executable_name}; echo $?
         }

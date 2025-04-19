@@ -3,16 +3,21 @@
 use crate::ast::{BinaryOperator, Expression, Program, Statement};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::Module;
+use inkwell::module::{Linkage, Module};
 use inkwell::passes::{PassManager, PassManagerBuilder};
-use inkwell::types::BasicMetadataTypeEnum;
-use inkwell::values::{AnyValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 // Added BasicValueEnum
-use inkwell::OptimizationLevel;
+use inkwell::targets::{
+    CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
+};
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
+use inkwell::values::{
+    AnyValue, BasicValueEnum, FloatValue, FunctionValue, GlobalValue, PointerValue,
+};
+use inkwell::{AddressSpace, OptimizationLevel};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fmt;
 use std::path::Path;
-use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple};
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +70,7 @@ pub struct Compiler<'a, 'ctx> {
     functions: HashMap<String, FunctionValue<'ctx>>, // Stores defined functions
     // Add the Function Pass Manager
     fpm: PassManager<FunctionValue<'ctx>>,
+    printf_func: Option<FunctionValue<'ctx>>, // Cache printf function value
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -105,8 +111,51 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             variables: HashMap::new(),
             functions: HashMap::new(),
             current_function: None,
-            fpm, // Store the initialized FPM
+            fpm,               // Store the initialized FPM
+            printf_func: None, // Initialize to None
         }
+    }
+
+    // Helper to declare or get the printf function
+    fn get_or_declare_printf(&mut self) -> FunctionValue<'ctx> {
+        if let Some(func) = self.printf_func {
+            return func;
+        }
+
+        // Declare printf: i32 printf(i8*, ...)
+        let i32_type = self.context.i32_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default()); // char* is i8*
+
+        // Declare the function type as variadic
+        let printf_type = i32_type.fn_type(&[i8_ptr_type.into()], true); // true for variadic
+
+        // Add the function declaration to the module
+        // Use External linkage so linker finds it in libc
+        let printf_func = self.module.add_function(
+            "printf", // C function name
+            printf_type,
+            Some(Linkage::External), // Specify external linkage
+        );
+
+        self.printf_func = Some(printf_func); // Cache it
+        printf_func
+    }
+
+    // Helper to create a global string constant (for format strings)
+    fn create_global_string(&self, name: &str, value: &str, linkage: Linkage) -> GlobalValue<'ctx> {
+        let c_string = CString::new(value).expect("CString::new failed");
+        // Use `to_bytes()` (length *without* null) and let LLVM add the null terminator (`false`)
+        let string_val = self.context.const_string(c_string.to_bytes(), false);
+
+        let global = self.module.add_global(
+            string_val.get_type(), // Type should now be correct (e.g., [4 x i8] for "%f\n")
+            Some(AddressSpace::default()),
+            name,
+        );
+        global.set_linkage(linkage);
+        global.set_initializer(&string_val);
+        global.set_constant(true);
+        global
     }
 
     // Helper to create an alloca instruction in the function's entry block
@@ -414,22 +463,36 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         }
     }
 
-    // Compile the program into functions within the module, optimize them
-    // Returns Ok(()) on success, indicating the module is ready for emission
+    /// Compile the program into the module, generating a standard C main function
+    /// that calls printf with the result of the last top-level expression.
     pub fn compile_program_to_module(&mut self, program: &Program) -> Result<(), CodeGenError> {
-        // --- Setup Main Function (Placeholder/Wrapper if needed) ---
-        // We still need *a* function to anchor the compilation if the program
-        // only contains function definitions but no top-level statements to execute.
-        // However, the actual execution logic might come from a different "main".
-        // For now, let's keep generating the implicit 'main' based on top-level statements.
-        // If program has only `fun` defs, main will just return 0.0.
+        // --- Reset state for this compilation unit ---
+        self.functions.clear(); // Clear user function definitions (printf is handled separately)
+        self.printf_func = None; // Clear printf cache
 
-        let f64_type = self.context.f64_type();
-        let main_fn_type = f64_type.fn_type(&[], false);
-        let main_function = self.module.add_function("main", main_fn_type, None); // Or maybe a different name like "_start" if linking directly
+        // --- Declare Printf Early ---
+        // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)
+        self.get_or_declare_printf();
+
+        // --- Define User Functions ---
+        // First pass: Define all user functions so they are available for calls
+        // Need to be careful about compile_statement potentially modifying state needed later
+        // Let's compile functions within the main loop for now, requires functions defined before use.
+        // A multi-pass approach might be better later.
+
+        // --- Setup C-Style Main Function ---
+        let i32_type = self.context.i32_type();
+        // Standard C main signature: int main() (or int main(int argc, char** argv))
+        // We'll use the simple int main() for now.
+        let main_fn_type = i32_type.fn_type(&[], false);
+        let main_function = self.module.add_function(
+            "main", // Standard C entry point name
+            main_fn_type,
+            None, // Default linkage (usually external)
+        );
         let entry_block = self.context.append_basic_block(main_function, "entry");
 
-        // --- Save/Restore context (as in compile_program) ---
+        // --- Save/Restore context ---
         let original_builder_pos = self.builder.get_insert_block();
         let original_func = self.current_function;
         let original_vars = self.variables.clone();
@@ -440,22 +503,89 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         // --- Compile Top-Level Statements ---
         let mut last_main_expr_value: Option<FloatValue<'ctx>> = None;
         for stmt in &program.statements {
-            // Compile each statement (which includes function definitions)
             match self.compile_statement(stmt)? {
                 Some(value) => last_main_expr_value = Some(value),
-                None => {}
+                None => {} // LetBinding or FunctionDef
             }
-            // Note: compile_statement now runs FPM on functions it defines
         }
 
-        // --- Build Return for Main ---
+        // --- Generate Printf Call ---
+
         if let Some(return_value) = last_main_expr_value {
-            self.builder.build_return(Some(&return_value));
+            // 1. Create the format string "%f\n" global constant
+            let format_str_val = "%f\n"; // Our desired string
+            let format_str_global = self.create_global_string("printf_format_f64", format_str_val, Linkage::Private);
+
+            // 2. Get pointer to the first element (i8*) using GEP
+            let zero_idx = self.context.i32_type().const_int(0, false);
+            // GEP requires the type of the global variable itself for indexing correctly
+            let global_type = format_str_global.get_value_type().into_array_type();
+            let format_str_ptr = match unsafe {
+                self.builder.build_in_bounds_gep(
+                    global_type, // Pass the actual global's type ([N x i8])
+                    format_str_global.as_pointer_value(),
+                    &[zero_idx, zero_idx], // Indices: [array index 0][element index 0]
+                    "format_str_ptr",
+                )
+            }{
+                Ok(ptr) => ptr,
+                Err(e) => {
+                    return Err(CodeGenError::LlvmError(format!(
+                        "LLVM error during GEP for format string: {}",
+                        e
+                    )));
+                }
+            };
+            // The GEP result is directly the i8* we need.
+
+            // 3. Build the call to printf
+            let printf_func = self.get_or_declare_printf();
+            self.builder.build_call(
+                printf_func,
+                &[format_str_ptr.into(), return_value.into()], // Pass i8* and f64
+                "printf_call",
+            );
         } else {
-            self.builder.build_return(Some(&f64_type.const_float(0.0)));
+            // Handle "No result" case similarly with create_global_string and GEP
+            let format_str_val = "No result\n";
+            let format_str_global = self.create_global_string("printf_format_nores", format_str_val, Linkage::Private);
+            let zero_idx = self.context.i32_type().const_int(0, false);
+            let global_type = format_str_global.get_value_type().into_array_type();
+            let format_str_ptr = match unsafe {
+                self.builder.build_in_bounds_gep(
+                    global_type,
+                    format_str_global.as_pointer_value(),
+                    &[zero_idx, zero_idx],
+                    "format_str_ptr_nores",
+                )
+            }{
+                Ok(ptr) => ptr,
+                Err(e) => {
+                    return Err(CodeGenError::LlvmError(format!(
+                        "LLVM error during GEP for no result string: {}",
+                        e
+                    )));
+                }
+            };
+            let printf_func = self.get_or_declare_printf();
+            self.builder.build_call(printf_func, &[format_str_ptr.into()], "printf_call_nores");
         }
 
-        // --- Optimize Main ---
+        // --- Build Return for C Main (return 0) ---
+        self.builder
+            .build_return(Some(&i32_type.const_int(0, false))); // return 0;
+
+        // --- Restore Compiler State ---
+        // ... (restore variables, current_function, builder position) ...
+        self.variables = original_vars;
+        self.current_function = original_func;
+        if let Some(bb) = original_builder_pos {
+            self.builder.position_at_end(bb);
+        }
+
+        // --- Optimize and Verify Main ---
+        // No need to optimize here if we optimize later or let TargetMachine handle it?
+        // Let's keep the FPM run on main for consistency for now.
         if main_function.verify(true) {
             let changed = self.fpm.run_on(&main_function);
             if changed {
@@ -463,42 +593,20 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             }
             if !main_function.verify(true) {
                 // Handle verification failure after optimization
-                unsafe {
-                    main_function.delete();
-                } // Clean up module
-                // Restore context before error return
-                self.variables = original_vars;
-                self.current_function = original_func;
-                if let Some(bb) = original_builder_pos {
-                    self.builder.position_at_end(bb);
-                }
+                // unsafe { main_function.delete(); } // No need to delete, just return Err
                 return Err(CodeGenError::LlvmError(
                     "Main function verification failed after optimization".to_string(),
                 ));
             }
         } else {
             // Handle verification failure before optimization
-            unsafe {
-                main_function.delete();
-            }
-            self.variables = original_vars;
-            self.current_function = original_func;
-            if let Some(bb) = original_builder_pos {
-                self.builder.position_at_end(bb);
-            }
+            // unsafe { main_function.delete(); }
             return Err(CodeGenError::LlvmError(
                 "Main function verification failed before optimization".to_string(),
             ));
         }
 
-        // --- Restore Compiler State ---
-        self.variables = original_vars;
-        self.current_function = original_func;
-        if let Some(bb) = original_builder_pos {
-            self.builder.position_at_end(bb);
-        }
-
-        Ok(()) // Indicate module is ready
+        Ok(()) // Module is ready
     }
 
     /// Emits the compiled module to an object file.
@@ -524,7 +632,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
         // --- Create Target Machine ---
         // Configure CPU, features, optimization level etc.
-        let cpu = "apple-m4"; // Be specific for M4 - "generic" or "" might also work
+        let cpu = "generic"; // Be specific for M4 - "generic" or "" might also work
         let features = ""; // Use "" for default features for the CPU
         let opt_level = OptimizationLevel::Default; // Or match FPM level used
         let reloc_mode = RelocMode::Default; // Position Independent Code (PIC) is common default
