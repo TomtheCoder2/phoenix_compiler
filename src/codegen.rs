@@ -4,11 +4,13 @@ use crate::ast::{BinaryOperator, Expression, Program, Statement};
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{AnyValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 // Added BasicValueEnum
+use inkwell::passes::{PassManager, PassManagerBuilder};
+use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::values::{AnyValue, BasicValueEnum, FloatValue, FunctionValue, PointerValue};
 use std::collections::HashMap;
 use std::fmt;
-use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::OptimizationLevel;
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +61,8 @@ pub struct Compiler<'a, 'ctx> {
     variables: HashMap<String, PointerValue<'ctx>>, // Symbol table persists across statements
     current_function: Option<FunctionValue<'ctx>>,
     functions: HashMap<String, FunctionValue<'ctx>>, // Stores defined functions
+    // Add the Function Pass Manager
+    fpm: PassManager<FunctionValue<'ctx>>,
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -67,13 +71,39 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         builder: &'a Builder<'ctx>,
         module: &'a Module<'ctx>,
     ) -> Self {
+        // --- Initialize the Pass Manager ---
+        let pass_manager_builder = PassManagerBuilder::create();
+        // Configure standard optimization passes based on a level.
+        // Level 2 (`Default`) is a good balance. Level 3 (`Aggressive`) is more intense.
+        pass_manager_builder.set_optimization_level(OptimizationLevel::Default);
+
+        // Create the Function Pass Manager
+        let fpm = PassManager::create(module); // PassManager::create requires module for Module passes
+
+        // Add desired passes - PassManagerBuilder helps populate common ones
+        // You can also add passes manually using fpm.add_..._pass() methods.
+        // See inkwell docs / LLVM pass list for available passes.
+        // Standard sequence for O2/O3 often includes:
+        // - mem2reg: Promotes memory variables (allocas) to SSA registers - HUGE gains
+        // - instcombine: Combines redundant instructions
+        // - gvn: Global Value Numbering (eliminates redundant calculations)
+        // - simplifycfg: Simplifies control flow graph
+        // - ... and many more
+
+        // Populate the FPM using the builder's recommendations for the chosen opt level
+        pass_manager_builder.populate_function_pass_manager(&fpm);
+
+        // It's crucial to initialize the FPM *after* adding passes.
+        fpm.initialize(); // Call initialize AFTER passes are added
+
         Compiler {
             context,
             builder,
             module,
             variables: HashMap::new(),
+            functions: HashMap::new(),
             current_function: None,
-            functions: HashMap::new(), // Initialize function map
+            fpm, // Store the initialized FPM
         }
     }
 
@@ -180,18 +210,20 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 }
 
                 // 4. Build the call instruction
-                let call_site_val = match self
-                    .builder
-                    .build_call(func_to_call, &compiled_args, "calltmp") {
-                    Ok(call_site_val) => call_site_val,
-                    Err(e) => {
-                        // Handle potential LLVM errors
-                        return Err(CodeGenError::LlvmError(format!(
-                            "LLVM error during function call '{}': {}",
-                            name, e
-                        )));
-                    }
-                };
+                let call_site_val =
+                    match self
+                        .builder
+                        .build_call(func_to_call, &compiled_args, "calltmp")
+                    {
+                        Ok(call_site_val) => call_site_val,
+                        Err(e) => {
+                            // Handle potential LLVM errors
+                            return Err(CodeGenError::LlvmError(format!(
+                                "LLVM error during function call '{}': {}",
+                                name, e
+                            )));
+                        }
+                    };
 
                 // The result of build_call is Result<CallSiteValue, ErrorMsg>
                 // CallSiteValue represents the return value (or void).
@@ -255,10 +287,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // --- Define Function Type ---
                 let f64_type = self.context.f64_type();
                 // Create a vector of f64 types for parameters
-                let param_types: Vec<BasicMetadataTypeEnum> =
-                    std::iter::repeat(f64_type.into())
-                        .take(params.len())
-                        .collect();
+                let param_types: Vec<BasicMetadataTypeEnum> = std::iter::repeat(f64_type.into())
+                    .take(params.len())
+                    .collect();
                 let fn_type = f64_type.fn_type(&param_types, false); // f64(f64, f64, ...)
 
                 // --- Create LLVM Function ---
@@ -327,12 +358,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     // Maybe self.builder.clear_insertion_position(); ? Or leave it?
                 }
 
-
                 // --- Handle Body Compilation Error ---
                 if let Some(err) = body_compile_err {
                     // Function definition itself failed, remove from map and module?
                     self.functions.remove(name);
-                    unsafe { function.delete(); } // Delete potentially malformed function
+                    unsafe {
+                        function.delete();
+                    } // Delete potentially malformed function
                     return Err(err);
                 }
 
@@ -341,10 +373,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     // Function definition doesn't produce a "value" for the outer scope
                     Ok(None)
                 } else {
-                    eprintln!("Invalid function generated '{}':\n{}", name, function.print_to_string().to_string());
+                    eprintln!(
+                        "Invalid function generated '{}':\n{}",
+                        name,
+                        function.print_to_string().to_string()
+                    );
                     self.functions.remove(name); // Remove bad function from our map
-                    unsafe { function.delete(); } // Delete from module
-                    Err(CodeGenError::LlvmError(format!("Function '{}' verification failed", name)))
+                    unsafe {
+                        function.delete();
+                    } // Delete from module
+                    Err(CodeGenError::LlvmError(format!(
+                        "Function '{}' verification failed",
+                        name
+                    )))
                 }
             } // End FunctionDef
         }
