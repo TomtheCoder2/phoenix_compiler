@@ -73,7 +73,7 @@ fn token_precedence(token: &Token) -> Precedence {
         Token::Plus | Token::Minus => Precedence::Sum, // Infix minus
         Token::Star | Token::Slash => Precedence::Product,
         Token::LParen => Precedence::Call,
-        _ => Precedence::Lowest,
+        _ => Lowest,
     }
 }
 
@@ -187,8 +187,27 @@ impl<'a> Parser<'a> {
             Token::Var => self.parse_let_or_var_statement(true), // Pass mutable flag
             Token::Fun => self.parse_function_definition(),      // Added fun
             Token::If => self.parse_if_statement(),
+            Token::While => self.parse_while_statement(), // Added
             _ => self.parse_expression_statement(),
         }
+    }
+
+    // Parses: while ( CONDITION ) { BODY }
+    // No trailing semicolon expected/consumed.
+    fn parse_while_statement(&mut self) -> ParseResult<Statement> {
+        self.next_token(); // Consume 'while'
+
+        self.expect_and_consume(Token::LParen)?;
+        let condition = self.parse_expression(Lowest)?;
+        self.expect_and_consume(Token::RParen)?;
+
+        self.expect_and_consume(Token::LBrace)?;
+        let body = self.parse_block_statements()?; // Consumes '}'
+
+        Ok(Statement::WhileStmt {
+            condition,
+            body: Box::new(body),
+        })
     }
 
     // Parses: if ( CONDITION ) { THEN_BRANCH } [ else { ELSE_BRANCH } ]
@@ -196,7 +215,7 @@ impl<'a> Parser<'a> {
     fn parse_if_statement(&mut self) -> ParseResult<Statement> {
         self.next_token(); // Consume 'if'
         self.expect_and_consume(Token::LParen)?;
-        let condition = self.parse_expression(Precedence::Lowest)?;
+        let condition = self.parse_expression(Lowest)?;
         self.expect_and_consume(Token::RParen)?;
         self.expect_and_consume(Token::LBrace)?; // Expect '{'
         let then_branch = self.parse_block_statements()?;
@@ -552,17 +571,17 @@ impl<'a> Parser<'a> {
     fn parse_if_expression(&mut self) -> ParseResult<Expression> {
         self.next_token(); // Consume 'if'
         self.expect_and_consume(Token::LParen)?;
-        let condition = self.parse_expression(Precedence::Lowest)?;
+        let condition = self.parse_expression(Lowest)?;
         self.expect_and_consume(Token::RParen)?;
 
         // Expect THEN branch expression (could be a block expression)
-        let then_branch = self.parse_expression(Precedence::Lowest)?;
+        let then_branch = self.parse_expression(Lowest)?;
 
         // Expect 'else'
         self.expect_and_consume(Token::Else)?;
 
         // Expect ELSE branch expression (could be a block expression)
-        let else_branch = self.parse_expression(Precedence::Lowest)?;
+        let else_branch = self.parse_expression(Lowest)?;
 
         Ok(Expression::IfExpr {
             condition: Box::new(condition),
@@ -610,7 +629,7 @@ impl<'a> Parser<'a> {
             } else {
                 // Not obviously a statement, assume it's the final expression
                 // If there's another token after this that's not '}', error?
-                let expr = self.parse_expression(Precedence::Lowest)?;
+                let expr = self.parse_expression(Lowest)?;
                 // Check if next token is '}' - if so, this is the final expression
                 if self.current_token == Token::RBrace {
                     final_expression = Some(Box::new(expr));
@@ -717,10 +736,10 @@ mod tests {
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::LetBinding { value, .. } => match value {
-                Expression::UnaryOp { op, operand } => {
+            LetBinding { value, .. } => match value {
+                UnaryOp { op, operand } => {
                     assert_eq!(*op, UnaryOperator::Negate);
-                    assert_eq!(**operand, Expression::IntLiteral(10));
+                    assert_eq!(**operand, IntLiteral(10));
                 }
                 _ => panic!("Expected UnaryOp"),
             },
@@ -736,9 +755,9 @@ mod tests {
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::ExpressionStmt(Expression::UnaryOp { op, operand }) => {
+            ExpressionStmt(UnaryOp { op, operand }) => {
                 assert_eq!(*op, UnaryOperator::Not);
-                assert_eq!(**operand, Expression::BoolLiteral(true));
+                assert_eq!(**operand, BoolLiteral(true));
             }
             _ => panic!("Expected ExpressionStmt(UnaryOp)"),
         }
@@ -1124,7 +1143,7 @@ mod tests {
                 assert!(else_branch.is_none());
                 // Check condition and then_branch are parsed correctly
                 match &*condition {
-                    Expression::Variable(name) => assert_eq!(name, "x"),
+                    Variable(name) => assert_eq!(name, "x"),
                     _ => panic!("Condition was not Variable"),
                 }
                 match &**then_branch {
@@ -1144,7 +1163,7 @@ mod tests {
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::LetBinding {
+            LetBinding {
                 name,
                 type_ann: _,
                 value,
@@ -1152,7 +1171,7 @@ mod tests {
                 assert_eq!(name, "result");
                 // Check value is an IfExpr
                 match value {
-                    Expression::IfExpr {
+                    IfExpr {
                         condition: _,
                         then_branch: _,
                         else_branch: _,
@@ -1175,23 +1194,23 @@ mod tests {
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::LetBinding { value, .. } => match &value {
+            LetBinding { value, .. } => match &value {
                 // Deref Box
-                Expression::IfExpr {
+                IfExpr {
                     condition: _,
                     then_branch,
                     else_branch,
                 } => {
                     // Check then branch is Block with print stmt and final expr 1
                     match &**then_branch {
-                        Expression::Block {
+                        Block {
                             statements,
                             final_expression,
                         } => {
                             assert_eq!(statements.len(), 1); // print(1);
                             assert!(final_expression.is_some());
                             match final_expression {
-                                Some(e) => assert_eq!(**e, Expression::IntLiteral(1)), // Check final expr
+                                Some(e) => assert_eq!(**e, IntLiteral(1)), // Check final expr
                                 None => panic!("Expected final expression"),
                             }
                         }
@@ -1199,7 +1218,7 @@ mod tests {
                     }
                     // Check else branch is Block with print stmt and final expr -1 (needs unary minus support later)
                     match &**else_branch {
-                        Expression::Block {
+                        Block {
                             statements,
                             final_expression,
                         } => {
@@ -1230,5 +1249,25 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ParseError::ExpectedToken(Token::Else))));
+    }
+
+    #[test]
+    fn test_parse_while_statement() {
+        let input = "while (count < 10) { print(count); count = count + 1; }";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            WhileStmt { condition, body } => {
+                // Check condition is count < 10
+                // ... assertions for condition ...
+                // Check body has two statements (print, assignment)
+                assert_eq!(body.statements.len(), 2);
+                // ... assertions for body statements ...
+            }
+            _ => panic!("Expected WhileStmt"),
+        }
+        assert_eq!(parser.current_token, Token::Eof);
     }
 }

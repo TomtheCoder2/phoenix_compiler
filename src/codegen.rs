@@ -418,17 +418,16 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 .into())
                             }
                             BasicValueEnum::FloatValue(fv) => {
-                                Ok((
-                                    match self.builder.build_float_neg(fv, "fneg_tmp") {
-                                        Ok(val) => val,
-                                        Err(e) => {
-                                            return Err(CodeGenError::LlvmError(format!(
-                                                "LLVM error during float negation: {}",
-                                                e
-                                            )))
-                                        }
-                                    })
-                                    .into())
+                                Ok((match self.builder.build_float_neg(fv, "fneg_tmp") {
+                                    Ok(val) => val,
+                                    Err(e) => {
+                                        return Err(CodeGenError::LlvmError(format!(
+                                            "LLVM error during float negation: {}",
+                                            e
+                                        )))
+                                    }
+                                })
+                                .into())
                             }
                             _ => Err(CodeGenError::InvalidUnaryOperation(format!(
                                 "Cannot apply arithmetic negate '-' to type {:?}",
@@ -445,17 +444,16 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 // 2. Compare with false (0): not x == (x == 0)
                                 // Let's use XOR.
                                 let true_val = self.context.bool_type().const_int(1, false);
-                                Ok((
-                                    match self.builder.build_xor(iv, true_val, "not_tmp") {
-                                        Ok(val) => val,
-                                        Err(e) => {
-                                            return Err(CodeGenError::LlvmError(format!(
-                                                "LLVM error during boolean negation: {}",
-                                                e
-                                            )))
-                                        }
-                                    })
-                                    .into())
+                                Ok((match self.builder.build_xor(iv, true_val, "not_tmp") {
+                                    Ok(val) => val,
+                                    Err(e) => {
+                                        return Err(CodeGenError::LlvmError(format!(
+                                            "LLVM error during boolean negation: {}",
+                                            e
+                                        )))
+                                    }
+                                })
+                                .into())
                             }
                             _ => Err(CodeGenError::InvalidUnaryOperation(format!(
                                 "Cannot apply logical not '!' to type {:?}",
@@ -802,6 +800,56 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let value = self.compile_expression(expr)?;
                 Ok(Some(value))
             }
+
+            // --- While Statement ---
+            Statement::WhileStmt { condition, body } => {
+                let current_func = self
+                    .current_function
+                    .expect("Cannot compile 'while' outside a function");
+
+                // 1. Create Basic Blocks
+                // Block to evaluate the condition
+                let cond_bb = self.context.append_basic_block(current_func, "while_cond");
+                // Block for the loop body
+                let loop_bb = self.context.append_basic_block(current_func, "while_body");
+                // Block for code after the loop
+                let after_bb = self.context.append_basic_block(current_func, "after_while");
+
+                // 2. Branch from current block to condition check
+                self.builder.build_unconditional_branch(cond_bb);
+
+                // 3. Compile Condition Check Block
+                self.builder.position_at_end(cond_bb);
+                let cond_val = self.compile_expression(condition)?;
+                let bool_cond = match cond_val {
+                    // Verify condition is boolean (i1)
+                    BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => iv,
+                    _ => {
+                        return Err(CodeGenError::InvalidType(format!(
+                            "While condition must be boolean (i1), found {:?}",
+                            cond_val.get_type()
+                        )))
+                    }
+                };
+                // Build conditional branch based on condition value
+                self.builder
+                    .build_conditional_branch(bool_cond, loop_bb, after_bb);
+
+                // 4. Compile Loop Body Block
+                self.builder.position_at_end(loop_bb);
+                let _ = self.compile_block(body)?; // Compile the body statements, ignore value
+                                                   // After body, unconditionally branch back to condition check
+                if loop_bb.get_terminator().is_none() {
+                    // Only branch if block wasn't terminated (e.g. by future return/break)
+                    self.builder.build_unconditional_branch(cond_bb);
+                }
+
+                // 5. Position builder at the block after the loop
+                self.builder.position_at_end(after_bb);
+
+                // While statement yields no value
+                Ok(None)
+            } // End WhileStmt
 
             // --- If Statement (optional else, no return value/PHI needed) ---
             Statement::IfStmt {

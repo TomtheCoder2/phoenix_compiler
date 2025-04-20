@@ -41,16 +41,17 @@ pub enum Token {
     Comma,     // ','
     LBrace,    // '{'
     RBrace,    // '}'
-    Colon,     // ':' // Added for type annotations (e.g., let x: int)
+    Colon,     // ':' //  for type annotations (e.g., let x: int)
 
     // Keywords
     Let, // 'let'
-    Var, // 'var' (mutable binding) // Added
+    Var, // 'var' (mutable binding) 
     Fun, // 'fun'
-    True, // 'true' // Added
-    False, // 'false' // Added
+    True, // 'true' 
+    False, // 'false' 
     If, // 'if'
     Else, // 'else'
+    While, // 'while' 
     // Type Keywords (optional, could use identifiers)
     // TypeInt, // 'int'
     // TypeFloat, // 'float'

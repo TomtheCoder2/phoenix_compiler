@@ -38,6 +38,10 @@ pub enum Statement {
         // Else branch is now optional
         else_branch: Option<Box<Program>>,
     },
+    WhileStmt {
+        condition: Expression, // Condition must evaluate to bool
+        body: Box<Program>,    // Block of statements to repeat
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
