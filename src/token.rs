@@ -30,7 +30,7 @@ pub enum Token {
     GreaterEqual,// '>='
 
     // Logical Operators (Add later?)
-    // Bang, // '!' (Negation)
+    Bang, // '!' (Negation)
     // And,  // '&&'
     // Or,   // '||'
 
@@ -49,6 +49,8 @@ pub enum Token {
     Fun, // 'fun'
     True, // 'true' // Added
     False, // 'false' // Added
+    If, // 'if'
+    Else, // 'else'
     // Type Keywords (optional, could use identifiers)
     // TypeInt, // 'int'
     // TypeFloat, // 'float'

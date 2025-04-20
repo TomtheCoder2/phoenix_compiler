@@ -1,6 +1,8 @@
 // src/codegen.rs
 
-use crate::ast::{BinaryOperator, ComparisonOperator, Expression, Program, Statement};
+use crate::ast::{
+    BinaryOperator, ComparisonOperator, Expression, Program, Statement, UnaryOperator,
+};
 // Added BasicValueEnum
 use crate::types::Type;
 use inkwell::builder::Builder;
@@ -302,7 +304,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             BinaryOperator::Subtract => self.builder.build_float_sub(l, r, "fsubtmp"),
                             BinaryOperator::Multiply => self.builder.build_float_mul(l, r, "fmultmp"),
                             BinaryOperator::Divide => self.builder.build_float_div(l, r, "fdivtmp"),
-                        }{
+                        } {
                             Ok(val) => val,
                             Err(e) => {
                                 return Err(CodeGenError::LlvmError(format!(
@@ -394,6 +396,75 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 };
                 Ok(predicate.into()) // Comparison result is IntValue (i1)
             }
+            // --- Unary Operation ---
+            Expression::UnaryOp { op, operand } => {
+                let compiled_operand = self.compile_expression(operand)?;
+
+                match op {
+                    UnaryOperator::Negate => {
+                        match compiled_operand {
+                            BasicValueEnum::IntValue(iv) => {
+                                // LLVM has 'neg', but sometimes it's emitted as 'sub 0, op'
+                                // build_int_neg should handle this correctly.
+                                Ok((match self.builder.build_int_neg(iv, "ineg_tmp") {
+                                    Ok(val) => val,
+                                    Err(e) => {
+                                        return Err(CodeGenError::LlvmError(format!(
+                                            "LLVM error during integer negation: {}",
+                                            e
+                                        )))
+                                    }
+                                })
+                                .into())
+                            }
+                            BasicValueEnum::FloatValue(fv) => {
+                                Ok((
+                                    match self.builder.build_float_neg(fv, "fneg_tmp") {
+                                        Ok(val) => val,
+                                        Err(e) => {
+                                            return Err(CodeGenError::LlvmError(format!(
+                                                "LLVM error during float negation: {}",
+                                                e
+                                            )))
+                                        }
+                                    })
+                                    .into())
+                            }
+                            _ => Err(CodeGenError::InvalidUnaryOperation(format!(
+                                "Cannot apply arithmetic negate '-' to type {:?}",
+                                compiled_operand.get_type()
+                            ))),
+                        }
+                    }
+                    UnaryOperator::Not => {
+                        match compiled_operand {
+                            // Expecting i1 for logical not
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
+                                // LLVM doesn't have a native boolean 'not'. Common ways:
+                                // 1. xor with true (1): not x == x ^ 1
+                                // 2. Compare with false (0): not x == (x == 0)
+                                // Let's use XOR.
+                                let true_val = self.context.bool_type().const_int(1, false);
+                                Ok((
+                                    match self.builder.build_xor(iv, true_val, "not_tmp") {
+                                        Ok(val) => val,
+                                        Err(e) => {
+                                            return Err(CodeGenError::LlvmError(format!(
+                                                "LLVM error during boolean negation: {}",
+                                                e
+                                            )))
+                                        }
+                                    })
+                                    .into())
+                            }
+                            _ => Err(CodeGenError::InvalidUnaryOperation(format!(
+                                "Cannot apply logical not '!' to type {:?}",
+                                compiled_operand.get_type()
+                            ))),
+                        }
+                    }
+                } // End match op
+            }
             // --- Handle Function Calls ---
             Expression::FunctionCall { name, args } => {
                 // --- >> SPECIAL CASE: Built-in print function << ---
@@ -457,9 +528,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             // Attempt basic conversion (e.g., int to float) if needed later
                             // Or error out
                             return Err(CodeGenError::InvalidType(format!(
-                                    "Argument {} type mismatch for function '{}': expected {:?}, found {:?}",
-                                    i, name, expected_llvm_type, arg_val.get_type()
-                                )));
+                                "Argument {} type mismatch for function '{}': expected {:?}, found {:?}",
+                                i, name, expected_llvm_type, arg_val.get_type()
+                            )));
                         }
                         compiled_args.push(arg_val.into());
                     }
@@ -533,7 +604,124 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // 6. Assignment expression returns the assigned value
                 Ok(compiled_value)
             }
+
+            // --- If Expression (Branches are now Expressions) ---
+            Expression::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                // Compile condition, check if bool (i1)
+                let cond_val = self.compile_expression(condition)?;
+                let bool_cond = match cond_val {
+                    BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => iv,
+                    _ => {
+                        return Err(CodeGenError::InvalidType(format!(
+                            "If condition must be boolean (i1), found {:?}",
+                            cond_val.get_type()
+                        )))
+                    }
+                };
+
+                // Setup Blocks
+                let current_func = self
+                    .current_function
+                    .expect("Cannot compile 'if' expression without current function");
+                let then_bb = self.context.append_basic_block(current_func, "then_expr");
+                let else_bb = self.context.append_basic_block(current_func, "else_expr");
+                let merge_bb = self.context.append_basic_block(current_func, "ifcont_expr");
+
+                // Build Conditional Branch
+                self.builder
+                    .build_conditional_branch(bool_cond, then_bb, else_bb);
+
+                // Compile THEN Branch Expression
+                self.builder.position_at_end(then_bb);
+                // Recursively compile the expression for the 'then' branch
+                let then_val = self.compile_expression(then_branch)?;
+                // Branch to merge block if not already terminated
+                if then_bb.get_terminator().is_none() {
+                    self.builder.build_unconditional_branch(merge_bb);
+                }
+                let then_end_bb = self.builder.get_insert_block().unwrap_or(then_bb);
+
+                // Compile ELSE Branch Expression
+                self.builder.position_at_end(else_bb);
+                // Recursively compile the expression for the 'else' branch
+                let else_val = self.compile_expression(else_branch)?;
+                // Branch to merge block if not already terminated
+                if else_bb.get_terminator().is_none() {
+                    self.builder.build_unconditional_branch(merge_bb);
+                }
+                let else_end_bb = self.builder.get_insert_block().unwrap_or(else_bb);
+
+                // Merge Block and PHI Node
+                self.builder.position_at_end(merge_bb);
+                if then_val.get_type() != else_val.get_type() { /* Error: type mismatch */ }
+                let phi_type = then_val.get_type();
+                let phi_node = match self.builder.build_phi(phi_type, "ifexpr_tmp") {
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(format!(
+                            "LLVM error creating PHI node: {}",
+                            e
+                        )))
+                    }
+                };
+                phi_node.add_incoming(&[(&then_val, then_end_bb), (&else_val, else_end_bb)]);
+
+                Ok(phi_node.as_basic_value())
+            } // End IfExpr case
+
+            // --- Block Expression ---
+            Expression::Block {
+                statements,
+                final_expression,
+            } => {
+                // --- Scoping (Important!) ---
+                // Need to handle variable scopes if blocks introduce them.
+                // For now, assume blocks share scope with parent. Add proper scoping later.
+                // let original_vars = self.variables.clone(); // Save parent scope if needed
+
+                // 1. Compile the statements sequentially
+                for stmt in statements {
+                    // Compile statement, ignore optional value using `?` to propagate error
+                    self.compile_statement(stmt)?;
+                }
+
+                // 2. Compile the final expression if it exists
+                let result = if let Some(final_expr) = final_expression {
+                    self.compile_expression(final_expr)? // Result of block is final expr
+                } else {
+                    // Block has no final expression. What should it return?
+                    // For now, let's default to float 0.0. Needs refinement based on typing.
+                    // Or maybe error if used where value needed? Let's try 0.0 float default.
+                    self.context.f64_type().const_float(0.0).into()
+                };
+
+                // --- Restore Scope (if implemented) ---
+                // self.variables = original_vars;
+
+                Ok(result)
+            }
+        } // End match expr
+    }
+
+    // Helper to compile a block (Program) and return the value of its last ExpressionStmt
+    // Returns Ok(None) if block is empty or has no final ExpressionStmt
+    fn compile_block(&mut self, block_program: &Program) -> CompileStmtResult<'ctx> {
+        let mut last_val: Option<BasicValueEnum<'ctx>> = None;
+        // --- Scoping ---
+        // Need proper lexical scoping here. For now, variables leak out/in.
+        // let original_vars = self.variables.clone();
+        for stmt in &block_program.statements {
+            let stmt_val = self.compile_statement(stmt)?;
+            if stmt_val.is_some() {
+                last_val = stmt_val;
+            }
         }
+        // self.variables = original_vars;
+        Ok(last_val)
     }
 
     fn get_or_declare_print_float_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
@@ -613,6 +801,56 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // Compile the expression, result might be any basic type
                 let value = self.compile_expression(expr)?;
                 Ok(Some(value))
+            }
+
+            // --- If Statement (optional else, no return value/PHI needed) ---
+            Statement::IfStmt {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                // Compile condition, check bool...
+                let cond_val = self.compile_expression(condition)?;
+                let bool_cond = match cond_val {
+                    BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => iv,
+                    _ => {
+                        return Err(CodeGenError::InvalidType(format!(
+                            "If condition must be boolean (i1), found {:?}",
+                            cond_val.get_type()
+                        )))
+                    }
+                };
+                let current_func = self
+                    .current_function
+                    .expect("Cannot compile 'if' statement without current function");
+                let then_bb = self.context.append_basic_block(current_func, "then_stmt");
+                let merge_bb = self.context.append_basic_block(current_func, "ifcont_stmt");
+                let else_bb = if else_branch.is_some() {
+                    self.context.append_basic_block(current_func, "else_stmt")
+                } else {
+                    merge_bb
+                };
+                self.builder
+                    .build_conditional_branch(bool_cond, then_bb, else_bb);
+
+                // Compile THEN branch (Program block)
+                self.builder.position_at_end(then_bb);
+                let _ = self.compile_block(then_branch)?; // Compile the Program block
+                if then_bb.get_terminator().is_none() {
+                    self.builder.build_unconditional_branch(merge_bb);
+                }
+
+                // Compile ELSE branch (Program block)
+                if let Some(else_prog) = else_branch {
+                    self.builder.position_at_end(else_bb);
+                    let _ = self.compile_block(else_prog)?; // Compile the Program block
+                    if else_bb.get_terminator().is_none() {
+                        self.builder.build_unconditional_branch(merge_bb);
+                    }
+                }
+
+                self.builder.position_at_end(merge_bb);
+                Ok(None)
             }
 
             Statement::FunctionDef {
@@ -724,7 +962,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // --- Handle errors / Verification / Optimization ---
                 // ... (similar logic, run FPM, check verification) ...
-                if body_compile_err.is_some() || !function.verify(true) { /* ... handle error ... */
+                if body_compile_err.is_some() || !function.verify(true) {
+                    /* ... handle error ... */
                 }
                 self.fpm.run_on(&function);
                 if !function.verify(true) { /* ... handle error ... */ }

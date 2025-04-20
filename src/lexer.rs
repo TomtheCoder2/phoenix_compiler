@@ -76,8 +76,8 @@ impl<'a> Lexer<'a> {
                     self.advance(); // Consume '='
                     Token::NotEqual // '!='
                 } else {
-                    // Token::Bang // Handle '!' later if needed for logical NOT
-                    Token::Illegal('!') // For now, '!' alone is illegal
+                    Token::Bang // Handle '!' later if needed for logical NOT
+                    // Token::Illegal('!') // For now, '!' alone is illegal
                 }
             }
             Some('<') => {
@@ -107,6 +107,8 @@ impl<'a> Lexer<'a> {
                     "fun" => Token::Fun,
                     "true" => Token::BoolLiteral(true),
                     "false" => Token::BoolLiteral(false),
+                    "if" => Token::If,
+                    "else" => Token::Else,
                     // Check type names? Optional.
                     // type_name if keyword_to_type(type_name).is_some() => {
                     //     Token::Type(keyword_to_type(type_name).unwrap()) // Or specific TypeInt etc.
@@ -280,13 +282,12 @@ mod tests {
     //     // Let's keep it simple and assume `5.` parses as 5.0 for now.
     //     assert_eq!(lexer.next_token(), Token::IntNum(5));
     //     assert_eq!(lexer.next_token(), Token::Eof);
-    // 
+    //
     //     // Test case for an clearly illegal sequence starting with '.'
     //     let input = " . ";
     //     let mut lexer = Lexer::new(input);
     //     assert_eq!(lexer.next_token(), Token::Illegal('.'));
     // }
-
     #[test]
     fn test_function_tokens() {
         let input = "fun add(a, b) { a + b; }";
@@ -341,10 +342,16 @@ mod tests {
         let input = "123 45.6 true false 999";
         let mut lexer = Lexer::new(input);
         let tokens = vec![
-            Token::IntNum(123), Token::FloatNum(45.6), Token::BoolLiteral(true),
-            Token::BoolLiteral(false), Token::IntNum(999), Token::Eof,
+            Token::IntNum(123),
+            Token::FloatNum(45.6),
+            Token::BoolLiteral(true),
+            Token::BoolLiteral(false),
+            Token::IntNum(999),
+            Token::Eof,
         ];
-        for expected in tokens { assert_eq!(lexer.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(lexer.next_token(), expected);
+        }
     }
 
     #[test]
@@ -352,10 +359,18 @@ mod tests {
         let input = "= == != < <= > >=";
         let mut lexer = Lexer::new(input);
         let tokens = vec![
-            Token::Assign, Token::Equal, Token::NotEqual, Token::LessThan, Token::LessEqual,
-            Token::GreaterThan, Token::GreaterEqual, Token::Eof,
+            Token::Assign,
+            Token::Equal,
+            Token::NotEqual,
+            Token::LessThan,
+            Token::LessEqual,
+            Token::GreaterThan,
+            Token::GreaterEqual,
+            Token::Eof,
         ];
-        for expected in tokens { assert_eq!(lexer.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(lexer.next_token(), expected);
+        }
     }
 
     #[test]
@@ -363,11 +378,18 @@ mod tests {
         let input = "let x: int = 10;";
         let mut lexer = Lexer::new(input);
         let tokens = vec![
-            Token::Let, Token::Identifier("x".to_string()), Token::Colon,
+            Token::Let,
+            Token::Identifier("x".to_string()),
+            Token::Colon,
             Token::Identifier("int".to_string()), // Treat type name as identifier for now
-            Token::Assign, Token::IntNum(10), Token::Semicolon, Token::Eof,
+            Token::Assign,
+            Token::IntNum(10),
+            Token::Semicolon,
+            Token::Eof,
         ];
-        for expected in tokens { assert_eq!(lexer.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(lexer.next_token(), expected);
+        }
     }
 
     #[test]
@@ -375,9 +397,58 @@ mod tests {
         let input = "var counter = 0;";
         let mut lexer = Lexer::new(input);
         let tokens = vec![
-            Token::Var, Token::Identifier("counter".to_string()), Token::Assign,
-            Token::IntNum(0), Token::Semicolon, Token::Eof,
+            Token::Var,
+            Token::Identifier("counter".to_string()),
+            Token::Assign,
+            Token::IntNum(0),
+            Token::Semicolon,
+            Token::Eof,
         ];
-        for expected in tokens { assert_eq!(lexer.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(lexer.next_token(), expected);
+        }
+    }
+
+    #[test]
+    fn test_if_else_tokens() {
+        let input = "if (x < 10) { x = x + 1; } else { x = 0; }";
+        let mut l = Lexer::new(input);
+        let tokens = vec![
+            Token::If,
+            Token::LParen,
+            Token::Identifier("x".into()),
+            Token::LessThan,
+            Token::IntNum(10),
+            Token::RParen,
+            Token::LBrace,
+            Token::Identifier("x".into()),
+            Token::Assign,
+            Token::Identifier("x".into()),
+            Token::Plus,
+            Token::IntNum(1),
+            Token::Semicolon,
+            Token::RBrace,
+            Token::Else,
+            Token::LBrace,
+            Token::Identifier("x".into()),
+            Token::Assign,
+            Token::IntNum(0),
+            Token::Semicolon,
+            Token::RBrace,
+            Token::Eof,
+        ];
+        for expected in tokens {
+            assert_eq!(l.next_token(), expected);
+        }
+    }
+
+    #[test]
+    fn test_bang_operator() {
+        let input = "!true != false";
+        let mut l = Lexer::new(input);
+        let tokens = vec![
+            Token::Bang, Token::BoolLiteral(true), Token::NotEqual, Token::BoolLiteral(false), Token::Eof,
+        ];
+        for expected in tokens { assert_eq!(l.next_token(), expected); }
     }
 }

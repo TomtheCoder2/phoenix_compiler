@@ -1,7 +1,9 @@
 // src/parser.rs
 
 // Use the new AST structures
-use crate::ast::{BinaryOperator, ComparisonOperator, Expression, Program, Statement};
+use crate::ast::{
+    BinaryOperator, ComparisonOperator, Expression, Program, Statement, UnaryOperator,
+};
 use crate::lexer::Lexer;
 use crate::parser::Precedence::Lowest;
 use crate::token::{keyword_to_type, Token};
@@ -63,15 +65,24 @@ enum Precedence {
 // Map tokens to precedence levels
 fn token_precedence(token: &Token) -> Precedence {
     match token {
-        Token::Assign => Precedence::Assign, // = has low precedence
+        Token::Assign => Precedence::Assign,
         Token::Equal | Token::NotEqual => Precedence::Equals,
         Token::LessThan | Token::GreaterThan | Token::LessEqual | Token::GreaterEqual => {
             Precedence::LessGreater
         }
-        Token::Plus | Token::Minus => Precedence::Sum,
+        Token::Plus | Token::Minus => Precedence::Sum, // Infix minus
         Token::Star | Token::Slash => Precedence::Product,
-        Token::LParen => Precedence::Call, // For function calls
-        _ => Lowest,
+        Token::LParen => Precedence::Call,
+        _ => Precedence::Lowest,
+    }
+}
+
+// Map tokens to AST unary operators (used in parse_prefix)
+fn token_to_unary_op(token: &Token) -> Option<UnaryOperator> {
+    match token {
+        Token::Minus => Some(UnaryOperator::Negate),
+        Token::Bang => Some(UnaryOperator::Not),
+        _ => None,
     }
 }
 
@@ -175,8 +186,36 @@ impl<'a> Parser<'a> {
             Token::Let => self.parse_let_or_var_statement(false),
             Token::Var => self.parse_let_or_var_statement(true), // Pass mutable flag
             Token::Fun => self.parse_function_definition(),      // Added fun
+            Token::If => self.parse_if_statement(),
             _ => self.parse_expression_statement(),
         }
+    }
+
+    // Parses: if ( CONDITION ) { THEN_BRANCH } [ else { ELSE_BRANCH } ]
+    // Note: No trailing semicolon expected/consumed here.
+    fn parse_if_statement(&mut self) -> ParseResult<Statement> {
+        self.next_token(); // Consume 'if'
+        self.expect_and_consume(Token::LParen)?;
+        let condition = self.parse_expression(Precedence::Lowest)?;
+        self.expect_and_consume(Token::RParen)?;
+        self.expect_and_consume(Token::LBrace)?; // Expect '{'
+        let then_branch = self.parse_block_statements()?;
+
+        // --- Optional Else ---
+        let else_branch: Option<Box<Program>>;
+        if self.current_token == Token::Else {
+            self.next_token(); // Consume 'else'
+            self.expect_and_consume(Token::LBrace)?;
+            else_branch = Some(Box::new(self.parse_block_statements()?)); // Consumes '}'
+        } else {
+            else_branch = None; // No else branch found
+        }
+
+        Ok(Statement::IfStmt {
+            condition, // condition is an Expression now, not Boxed
+            then_branch: Box::new(then_branch),
+            else_branch,
+        })
     }
 
     // Parses: fun IDENT ( [PARAM_LIST]? ) [: TYPE]? { PROGRAM } ;?
@@ -454,26 +493,150 @@ impl<'a> Parser<'a> {
     }
 
     // Parses prefix elements: literals, identifiers, grouped expr, maybe unary later
+    // Parses prefix elements. Now handles 'if' as a prefix for an expression.
     fn parse_prefix(&mut self) -> ParseResult<Expression> {
-        let current_token_clone = self.current_token.clone();
-        let result = match self.current_token.clone() {
-            Token::FloatNum(value) => Ok(Expression::FloatLiteral(value)),
-            Token::IntNum(value) => Ok(Expression::IntLiteral(value)),
-            Token::BoolLiteral(value) => Ok(Expression::BoolLiteral(value)),
-            Token::Identifier(name) => Ok(Expression::Variable(name)),
-            Token::LParen => self.parse_grouped_expression(), // Delegate, consumes ()
-            // Add unary ops later e.g. Token::Minus, Token::Bang
+        // Don't clone here, decide based on token type
+        match self.current_token {
+            Token::FloatNum(v) => {
+                self.next_token();
+                Ok(Expression::FloatLiteral(v))
+            }
+            Token::IntNum(v) => {
+                self.next_token();
+                Ok(Expression::IntLiteral(v))
+            }
+            Token::BoolLiteral(v) => {
+                self.next_token();
+                Ok(Expression::BoolLiteral(v))
+            }
+            Token::Identifier(ref n) => {
+                // Use ref n to avoid clone if not needed yet
+                let name = n.clone(); // Clone only when creating Variable node
+                self.next_token();
+                Ok(Expression::Variable(name))
+            }
+            Token::LParen => {
+                // self.next_token(); // Consume '(' - NO, parse_grouped does it now
+                self.parse_grouped_expression()
+            }
+            Token::If => {
+                // If encountered in expression context, parse as IfExpr
+                self.parse_if_expression() // This function consumes all tokens for the if-expr
+            }
+            // --- Unary Operators ---
+            Token::Minus | Token::Bang => {
+                let op = token_to_unary_op(&self.current_token).unwrap(); // We know it's one of these
+                self.next_token(); // Consume the operator ('-' or '!')
+                                   // Recursively parse the operand, passing the Prefix precedence
+                                   // This ensures operators tighter than Prefix (like Call) bind correctly
+                                   // e.g., !myfunc() parses as !(myfunc())
+                let operand = self.parse_expression(Precedence::Prefix)?;
+                Ok(Expression::UnaryOp {
+                    op,
+                    operand: Box::new(operand),
+                })
+            }
+            Token::LBrace => self.parse_block_expression(), // Added: '{' starts block expression
             _ => Err(ParseError::UnexpectedToken {
                 expected: "expression".to_string(),
                 found: self.current_token.clone(),
             }),
-        };
-        // Consume the token associated with the prefix element only if successful
-        // and only if its not a () block, because the parse_group_expression function already consumes the RParen )!
-        if result.is_ok() && !matches!(current_token_clone, Token::LParen) {
-            self.next_token();
         }
-        result
+        // REMOVED general consumption from here
+    }
+
+    // Parses: if ( CONDITION ) { THEN_BRANCH } else { ELSE_BRANCH }
+    // Consumes all tokens from 'if' to the final '}' of the else block.
+    // Parses IfExpr: if ( CONDITION ) THEN_EXPR else ELSE_EXPR
+    // Branches are now parsed as expressions (often block expressions)
+    fn parse_if_expression(&mut self) -> ParseResult<Expression> {
+        self.next_token(); // Consume 'if'
+        self.expect_and_consume(Token::LParen)?;
+        let condition = self.parse_expression(Precedence::Lowest)?;
+        self.expect_and_consume(Token::RParen)?;
+
+        // Expect THEN branch expression (could be a block expression)
+        let then_branch = self.parse_expression(Precedence::Lowest)?;
+
+        // Expect 'else'
+        self.expect_and_consume(Token::Else)?;
+
+        // Expect ELSE branch expression (could be a block expression)
+        let else_branch = self.parse_expression(Precedence::Lowest)?;
+
+        Ok(Expression::IfExpr {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        })
+    }
+    // Helper (optional, simple version)
+    fn is_potential_statement_start(&self) -> bool {
+        // Very basic check. Needs refinement.
+        matches!(
+            self.current_token,
+            Token::Let | Token::Var | Token::Fun | Token::If
+        )
+    }
+
+    // Parses BlockExpr: { [ STMT; ]* [ EXPR ]? }
+    // Consumes initial '{' and final '}'.
+    fn parse_block_expression(&mut self) -> ParseResult<Expression> {
+        self.next_token(); // Consume '{'
+
+        let mut statements: Vec<Statement> = Vec::new();
+        let mut final_expression: Option<Box<Expression>> = None;
+
+        while self.current_token != Token::RBrace && self.current_token != Token::Eof {
+            // Try parsing a statement first
+            if self.peek_token == Token::Semicolon
+                || (
+                    // Heuristic: Look for tokens likely starting a statement vs expression
+                    // e.g., Let, Var, If often start statements. Others *might* be exprs.
+                    // This is tricky without full lookahead or backtracking.
+                    // Simpler approach: If parsing statement fails, *try* parsing as final expr.
+                    // Let's try: parse everything as statement candidate first.
+                    matches!(
+                        self.current_token,
+                        Token::Let | Token::Var | Token::Fun | Token::If
+                    )
+                )
+                || self.is_potential_statement_start()
+            // Add helper if needed
+            {
+                // Assume it's a statement
+                let stmt = self.parse_statement()?; // parse_statement expects semi or handles blocks
+                statements.push(stmt);
+            } else {
+                // Not obviously a statement, assume it's the final expression
+                // If there's another token after this that's not '}', error?
+                let expr = self.parse_expression(Precedence::Lowest)?;
+                // Check if next token is '}' - if so, this is the final expression
+                if self.current_token == Token::RBrace {
+                    final_expression = Some(Box::new(expr));
+                    // Don't break yet, let the loop condition handle RBrace
+                } else {
+                    // If it's not RBrace, it MUST be a semicolon for ExpressionStmt
+                    self.expect_and_consume(Token::Semicolon)?;
+                    statements.push(Statement::ExpressionStmt(expr));
+                }
+            }
+
+            // // Alternative logic: Check for semicolon explicitly
+            // let expr_or_stmt_result = self.parse_expression_or_statement_in_block();
+            // match expr_or_stmt_result {
+            //    Ok(Either::Left(stmt)) => statements.push(stmt),
+            //    Ok(Either::Right(expr)) => { final_expression = Some(Box::new(expr)); break; } // Found final expr
+            //    Err(e) => return Err(e),
+            // }
+        }
+
+        self.expect_and_consume(Token::RBrace)?; // Consume '}'
+
+        Ok(Expression::Block {
+            statements,
+            final_expression,
+        })
     }
 
     // Parses `( EXPR )` - consumes the initial `(` and final `)`
@@ -535,6 +698,60 @@ mod tests {
     }
     fn expr_stmt(expr: Expression) -> Statement {
         ExpressionStmt(expr)
+    }
+
+    #[test]
+    fn test_parse_neg_number() {
+        let input = "-42;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap(); // Expect Ok
+        assert_eq!(program.statements.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_unary_negation() {
+        let input = "let val = -10;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::LetBinding { value, .. } => match value {
+                Expression::UnaryOp { op, operand } => {
+                    assert_eq!(*op, UnaryOperator::Negate);
+                    assert_eq!(**operand, Expression::IntLiteral(10));
+                }
+                _ => panic!("Expected UnaryOp"),
+            },
+            _ => panic!("Expected LetBinding"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unary_not() {
+        let input = "!true;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ExpressionStmt(Expression::UnaryOp { op, operand }) => {
+                assert_eq!(*op, UnaryOperator::Not);
+                assert_eq!(**operand, Expression::BoolLiteral(true));
+            }
+            _ => panic!("Expected ExpressionStmt(UnaryOp)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unary_precedence() {
+        let input = "-5 + 10;"; // Should parse as (-5) + 10
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        // Expected: BinaryOp(Add, UnaryOp(Negate, 5), 10)
+        // ... add assertions ...
     }
 
     #[test]
@@ -885,5 +1102,133 @@ mod tests {
             }
             _ => panic!("Expected Assignment Expression Statement"),
         }
+    }
+
+    #[test]
+    fn test_parse_if_else_missing_else() {
+        // Our parser currently doesnt require else for `if` expressions
+        let input = "if (x) { 1; }";
+        println!("Input: {}", input);
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let result = parser.parse_program();
+        assert!(result.is_ok());
+        let program = result.unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            IfStmt {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                assert!(else_branch.is_none());
+                // Check condition and then_branch are parsed correctly
+                match &*condition {
+                    Expression::Variable(name) => assert_eq!(name, "x"),
+                    _ => panic!("Condition was not Variable"),
+                }
+                match &**then_branch {
+                    Program { statements, .. } => assert_eq!(statements.len(), 1),
+                }
+            }
+            _ => panic!("Expected IfStmt statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_if_expression_in_let() {
+        let input = "let result = if (x > 0) { 1 } else { 2 };";
+        println!("Input: {}", input);
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::LetBinding {
+                name,
+                type_ann: _,
+                value,
+            } => {
+                assert_eq!(name, "result");
+                // Check value is an IfExpr
+                match value {
+                    Expression::IfExpr {
+                        condition: _,
+                        then_branch: _,
+                        else_branch: _,
+                    } => {
+                        // Add detailed checks for condition/branches if needed
+                    }
+                    _ => panic!("Let value was not IfExpr"),
+                }
+            }
+            _ => panic!("Expected LetBinding statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_if_expression_block_branches() {
+        // Note: no semicolon after 1 or -1
+        let input = "let result = if (x > 0) { print(1); 1 } else { print(0); 2 };";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::LetBinding { value, .. } => match &value {
+                // Deref Box
+                Expression::IfExpr {
+                    condition: _,
+                    then_branch,
+                    else_branch,
+                } => {
+                    // Check then branch is Block with print stmt and final expr 1
+                    match &**then_branch {
+                        Expression::Block {
+                            statements,
+                            final_expression,
+                        } => {
+                            assert_eq!(statements.len(), 1); // print(1);
+                            assert!(final_expression.is_some());
+                            match final_expression {
+                                Some(e) => assert_eq!(**e, Expression::IntLiteral(1)), // Check final expr
+                                None => panic!("Expected final expression"),
+                            }
+                        }
+                        _ => panic!("Then branch not a Block expression"),
+                    }
+                    // Check else branch is Block with print stmt and final expr -1 (needs unary minus support later)
+                    match &**else_branch {
+                        Expression::Block {
+                            statements,
+                            final_expression,
+                        } => {
+                            assert_eq!(statements.len(), 1); // print(0);
+                            assert!(final_expression.is_some());
+                            // Assuming negative numbers parsed correctly or unary minus exists
+                            // match final_expression { /* ... Check for -1 ... */ }
+                        }
+                        _ => panic!("Else branch not a Block expression"),
+                    }
+                }
+                _ => panic!("Let value was not IfExpr"),
+            },
+            _ => panic!("Expected LetBinding statement"),
+        }
+    }
+
+    #[test]
+    fn test_parse_if_expr_missing_else() {
+        // If used as expression MUST have else
+        let input = "let result = if (x > 0) { 1 };";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let result = parser.parse_program();
+        assert!(result.is_err());
+        // Error occurs in parse_if_expression when expecting 'else'
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ParseError::ExpectedToken(Token::Else))));
     }
 }

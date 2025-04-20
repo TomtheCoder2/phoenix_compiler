@@ -18,7 +18,7 @@ pub enum Statement {
         value: Expression,
     },
     // Mutable binding
-    VarBinding { 
+    VarBinding {
         name: String,
         type_ann: Option<Type>,
         value: Expression,
@@ -32,6 +32,18 @@ pub enum Statement {
         return_type_ann: Option<Type>,
         body: Box<Program>,
     },
+    IfStmt {
+        condition: Expression,     // Condition is still an expression
+        then_branch: Box<Program>, // Block of statements
+        // Else branch is now optional
+        else_branch: Option<Box<Program>>,
+    },
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum UnaryOperator {
+    Negate, // Arithmetic negation (-)
+    Not,    // Logical not (!)
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -44,7 +56,8 @@ pub enum Expression {
     // Variable & Call
     Variable(String),
     // Assignment: target = value
-    Assignment { // Added
+    Assignment {
+        // Added
         target: String, // Name of variable being assigned to
         value: Box<Expression>,
     },
@@ -64,6 +77,22 @@ pub enum Expression {
         op: ComparisonOperator,
         left: Box<Expression>,
         right: Box<Expression>,
+    },
+    IfExpr {
+        // Renamed from If from previous chapter
+        condition: Box<Expression>,
+        then_branch: Box<Expression>, // Use Program for blocks
+        else_branch: Box<Expression>, // Mandatory
+    },
+    // Block used as an expression: { stmt; stmt; final_expr }
+    Block {
+        statements: Vec<Statement>,
+        // Optional final expression determines the block's value
+        final_expression: Option<Box<Expression>>,
+    },
+    UnaryOp {
+        op: UnaryOperator,
+        operand: Box<Expression>,
     },
     // UnaryOp { op: UnaryOperator, operand: Box<Expression> }, // Add later for '!' etc.
 }
