@@ -45,6 +45,7 @@ pub enum Token {
 
     // Keywords
     Let, // 'let'
+    Var, // 'var' (mutable binding) // Added
     Fun, // 'fun'
     True, // 'true' // Added
     False, // 'false' // Added

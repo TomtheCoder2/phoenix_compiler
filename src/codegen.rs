@@ -39,6 +39,7 @@ pub enum CodeGenError {
     InvalidUnaryOperation(String), // For later
     InvalidBinaryOperation(String), // For type mismatches
     MissingTypeInfo(String), // If type info is needed but missing
+    AssignmentToImmutable(String),
 }
 impl fmt::Display for CodeGenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,6 +73,13 @@ impl fmt::Display for CodeGenError {
             CodeGenError::InvalidUnaryOperation(msg) => {
                 write!(f, "Codegen Unary Op Error: {}", msg)
             }
+            CodeGenError::AssignmentToImmutable(msg) => {
+                write!(
+                    f,
+                    "Codegen Error: Cannot assign to immutable variable: {}",
+                    msg
+                )
+            }
         }
     }
 }
@@ -87,6 +95,7 @@ type CompileStmtResult<'ctx> = Result<Option<BasicValueEnum<'ctx>>, CodeGenError
 struct VariableInfo<'ctx> {
     ptr: PointerValue<'ctx>,
     ty: Type,
+    is_mutable: bool,
 }
 
 pub struct Compiler<'a, 'ctx> {
@@ -183,6 +192,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     .map(|(_, ret_ty, _)| *ret_ty) // Get return type from map
                     .ok_or_else(|| CodeGenError::MissingTypeInfo(format!("function {}", name)))
             }
+            _ => Err(CodeGenError::LlvmError("unexpected branch".to_string())),
         }
     }
 
@@ -489,12 +499,48 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     }
                 }
             } // End FunctionCall
+            // --- Assignment ---
+            Expression::Assignment { target, value } => {
+                // 1. Compile the RHS value
+                let compiled_value = self.compile_expression(value)?;
+
+                // 2. Look up the target variable
+                let var_info = self
+                    .variables
+                    .get(target)
+                    .ok_or_else(|| CodeGenError::UndefinedVariable(target.clone()))?;
+
+                // 3. Check mutability
+                if !var_info.is_mutable {
+                    return Err(CodeGenError::AssignmentToImmutable(target.clone()));
+                }
+
+                // 4. Check Type Match (Basic - needs proper type checking/conversion)
+                let expected_llvm_type = var_info.ty.to_llvm_basic_type(self.context);
+                if compiled_value.get_type() != expected_llvm_type {
+                    // TODO: Implement type conversion or error properly
+                    return Err(CodeGenError::InvalidType(format!(
+                        "Type mismatch in assignment to '{}': variable is {:?}, value is {:?}",
+                        target,
+                        expected_llvm_type,
+                        compiled_value.get_type()
+                    )));
+                }
+
+                // 5. Generate the store instruction
+                self.builder.build_store(var_info.ptr, compiled_value);
+
+                // 6. Assignment expression returns the assigned value
+                Ok(compiled_value)
+            }
         }
     }
 
     fn get_or_declare_print_float_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
         // Check cache... (Assume Compiler struct has print_float_wrapper_func: Option<...>)
-        if let Some(f) = self.print_float_wrapper_func { return Ok(f); }
+        if let Some(f) = self.print_float_wrapper_func {
+            return Ok(f);
+        }
         let f64_type = self.context.f64_type();
         let void_type = self.context.void_type();
         let fn_type = void_type.fn_type(&[f64_type.into()], false);
@@ -506,7 +552,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     }
 
     fn get_or_declare_print_int_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
-        if let Some(f) = self.print_int_wrapper_func { return Ok(f); }
+        if let Some(f) = self.print_int_wrapper_func {
+            return Ok(f);
+        }
         // Check cache... (Assume print_int_wrapper_func field)
         let i64_type = self.context.i64_type();
         let void_type = self.context.void_type();
@@ -520,7 +568,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
     fn get_or_declare_print_bool_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
         // Check cache... (Assume print_bool_wrapper_func field)
-        if let Some(f) = self.print_bool_wrapper_func { return Ok(f); }
+        if let Some(f) = self.print_bool_wrapper_func {
+            return Ok(f);
+        }
         let i1_type = self.context.bool_type(); // bool_type() is i1
         let void_type = self.context.void_type();
         let fn_type = void_type.fn_type(&[i1_type.into()], false);
@@ -544,44 +594,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } => {
                 // Compile the value expression
                 let compiled_value = self.compile_expression(value)?;
-                // Determine the type: from annotation or inferred (basic inference for now)
-                let var_type = match type_ann {
-                    Some(ann_ty) => {
-                        // TODO: Check if compiled_value type matches ann_ty (or is convertible)
-                        *ann_ty
-                    }
-                    None => {
-                        // Basic inference from value (replace with proper type checker)
-                        match compiled_value {
-                            BasicValueEnum::IntValue(iv) => {
-                                if iv.get_type().get_bit_width() == 1 {
-                                    Type::Bool
-                                } else {
-                                    Type::Int
-                                }
-                            }
-                            BasicValueEnum::FloatValue(_) => Type::Float,
-                            _ => {
-                                return Err(CodeGenError::InvalidType(
-                                    "Cannot infer type for let binding".to_string(),
-                                ))
-                            }
-                        }
-                    }
-                };
+                self.compile_var_let_stmt(name, type_ann, compiled_value, false)
+            }
 
-                // Allocate based on determined type
-                let alloca = self.create_entry_block_alloca(name, var_type);
-                self.builder.build_store(alloca, compiled_value);
-                // Store type info along with pointer
-                self.variables.insert(
-                    name.clone(),
-                    VariableInfo {
-                        ptr: alloca,
-                        ty: var_type,
-                    },
-                );
-                Ok(None) // Let statement yields no value itself
+            Statement::VarBinding {
+                name,
+                type_ann,
+                value,
+            } => {
+                // Compile the value expression
+                let compiled_value = self.compile_expression(value)?;
+
+                // Let statement yields no value itself
+                self.compile_var_let_stmt(name, type_ann, compiled_value, true)
             }
 
             Statement::ExpressionStmt(expr) => {
@@ -652,6 +677,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         VariableInfo {
                             ptr: param_alloca,
                             ty: param_toy_type,
+                            is_mutable: false,
                         },
                     );
                 }
@@ -706,7 +732,56 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 Ok(None)
             } // End FunctionDef
         } // End match stmt
-    } // End compile_statement
+    }
+
+    fn compile_var_let_stmt(
+        &mut self,
+        name: &String,
+        type_ann: &Option<Type>,
+        compiled_value: BasicValueEnum,
+        is_mutable: bool,
+    ) -> CompileStmtResult<'ctx> {
+        // Determine the type: from annotation or inferred (basic inference for now)
+        let var_type = match type_ann {
+            Some(ann_ty) => {
+                // TODO: Check if compiled_value type matches ann_ty (or is convertible)
+                *ann_ty
+            }
+            None => {
+                // Basic inference from value (replace with proper type checker)
+                match compiled_value {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 1 {
+                            Type::Bool
+                        } else {
+                            Type::Int
+                        }
+                    }
+                    BasicValueEnum::FloatValue(_) => Type::Float,
+                    _ => {
+                        return Err(CodeGenError::InvalidType(
+                            "Cannot infer type for let binding".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        // Allocate based on determined type
+        let alloca = self.create_entry_block_alloca(name, var_type);
+        self.builder.build_store(alloca, compiled_value);
+        // Store type info along with pointer
+        self.variables.insert(
+            name.clone(),
+            VariableInfo {
+                ptr: alloca,
+                ty: var_type,
+                is_mutable,
+            },
+        );
+        Ok(None) // Let statement yields no value itself
+    }
+    // End compile_statement
 
     /// Compile the program into the module, generating a standard C main function
     /// that calls printf with the result of the last top-level expression.

@@ -103,6 +103,7 @@ impl<'a> Lexer<'a> {
                 // Check keywords BEFORE returning identifier
                 return match ident.as_str() {
                     "let" => Token::Let,
+                    "var" => Token::Var,
                     "fun" => Token::Fun,
                     "true" => Token::BoolLiteral(true),
                     "false" => Token::BoolLiteral(false),
@@ -365,6 +366,17 @@ mod tests {
             Token::Let, Token::Identifier("x".to_string()), Token::Colon,
             Token::Identifier("int".to_string()), // Treat type name as identifier for now
             Token::Assign, Token::IntNum(10), Token::Semicolon, Token::Eof,
+        ];
+        for expected in tokens { assert_eq!(lexer.next_token(), expected); }
+    }
+
+    #[test]
+    fn test_var_keyword() {
+        let input = "var counter = 0;";
+        let mut lexer = Lexer::new(input);
+        let tokens = vec![
+            Token::Var, Token::Identifier("counter".to_string()), Token::Assign,
+            Token::IntNum(0), Token::Semicolon, Token::Eof,
         ];
         for expected in tokens { assert_eq!(lexer.next_token(), expected); }
     }

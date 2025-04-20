@@ -1,2 +1,4 @@
 [env]
 LLVM_SYS_150_PREFIX="/opt/homebrew/opt/llvm@15"
+# enable full stack trace
+RUST_BACKTRACE="1"

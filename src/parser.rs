@@ -1,12 +1,12 @@
 // src/parser.rs
 
 // Use the new AST structures
-use crate::ast::{BinaryOperator, ComparisonOperator, Expression, NumberType, Program, Statement};
+use crate::ast::{BinaryOperator, ComparisonOperator, Expression, Program, Statement};
 use crate::lexer::Lexer;
+use crate::parser::Precedence::Lowest;
 use crate::token::{keyword_to_type, Token};
 use crate::types::Type;
 use std::fmt;
-use crate::parser::Precedence::Lowest;
 
 // --- ParseError --- (Adjust as needed)
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +17,8 @@ pub enum ParseError {
     ExpectedIdentifier,
     ExpectedToken(Token), // Good for '=' or ';'
     // LetStmtMissingSemicolon, // Example specific error
-    InvalidTypeAnnotation(String), // Added
+    InvalidTypeAnnotation(String),
+    InvalidAssignmentTarget(String), // Added for errors like "5 = x;"
 }
 
 impl fmt::Display for ParseError {
@@ -35,6 +36,9 @@ impl fmt::Display for ParseError {
             ParseError::InvalidTypeAnnotation(type_name) => {
                 write!(f, "Parse Error: Invalid type annotation '{}'", type_name)
             }
+            ParseError::InvalidAssignmentTarget(type_name) => {
+                write!(f, "Parse Error: Invalid assignment target '{}'", type_name)
+            }
         }
     }
 }
@@ -47,6 +51,7 @@ pub type ParseResult<T> = Result<T, ParseError>;
 #[derive(PartialEq, PartialOrd)] // Allow comparing levels
 enum Precedence {
     Lowest,
+    Assign,      // =
     Equals,      // ==, !=
     LessGreater, // >, <, >=, <=
     Sum,         // +, -
@@ -58,6 +63,7 @@ enum Precedence {
 // Map tokens to precedence levels
 fn token_precedence(token: &Token) -> Precedence {
     match token {
+        Token::Assign => Precedence::Assign, // = has low precedence
         Token::Equal | Token::NotEqual => Precedence::Equals,
         Token::LessThan | Token::GreaterThan | Token::LessEqual | Token::GreaterEqual => {
             Precedence::LessGreater
@@ -65,7 +71,7 @@ fn token_precedence(token: &Token) -> Precedence {
         Token::Plus | Token::Minus => Precedence::Sum,
         Token::Star | Token::Slash => Precedence::Product,
         Token::LParen => Precedence::Call, // For function calls
-        _ => Precedence::Lowest,
+        _ => Lowest,
     }
 }
 
@@ -166,8 +172,9 @@ impl<'a> Parser<'a> {
     // --- Statement Parsing ---
     fn parse_statement(&mut self) -> ParseResult<Statement> {
         match self.current_token {
-            Token::Let => self.parse_let_statement(),
-            Token::Fun => self.parse_function_definition(), // Added fun
+            Token::Let => self.parse_let_or_var_statement(false),
+            Token::Var => self.parse_let_or_var_statement(true), // Pass mutable flag
+            Token::Fun => self.parse_function_definition(),      // Added fun
             _ => self.parse_expression_statement(),
         }
     }
@@ -259,9 +266,16 @@ impl<'a> Parser<'a> {
                     }
                     None => return Err(ParseError::InvalidTypeAnnotation(type_name.clone())),
                 },
-                _ => return Err(ParseError::UnexpectedToken { expected: "type name".to_string(), found: self.current_token.clone() })
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "type name".to_string(),
+                        found: self.current_token.clone(),
+                    })
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
 
         Ok((name, type_ann))
     }
@@ -284,9 +298,9 @@ impl<'a> Parser<'a> {
         Ok(Program { statements })
     }
 
-    // Parses: let IDENT [: TYPE]? = EXPRESSION ;
-    fn parse_let_statement(&mut self) -> ParseResult<Statement> {
-        self.next_token(); // Consume 'let'
+    // Combined parser for let/var: let/var IDENT [: TYPE]? = EXPRESSION ;
+    fn parse_let_or_var_statement(&mut self, is_mutable: bool) -> ParseResult<Statement> {
+        self.next_token(); // Consume 'let' or 'var'
 
         let name = match &self.current_token {
             Token::Identifier(n) => n.clone(),
@@ -319,25 +333,28 @@ impl<'a> Parser<'a> {
             None // No type annotation
         };
 
-        // Expect '='
-        self.expect_and_consume(Token::Assign)?;
-
-        // Parse value expression
-        let value_expr = self.parse_expression(Precedence::Lowest)?; // Use enum precedence
-
-        // Expect semicolon
+        self.expect_and_consume(Token::Assign)?; // Expect and consume initial '='
+        let value_expr = self.parse_expression(Lowest)?;
         self.expect_and_consume(Token::Semicolon)?;
 
-        Ok(Statement::LetBinding {
-            name,
-            type_ann,
-            value: value_expr,
-        })
+        if is_mutable {
+            Ok(Statement::VarBinding {
+                name,
+                type_ann,
+                value: value_expr,
+            })
+        } else {
+            Ok(Statement::LetBinding {
+                name,
+                type_ann,
+                value: value_expr,
+            })
+        }
     }
 
     // Parses: EXPRESSION ;
     fn parse_expression_statement(&mut self) -> ParseResult<Statement> {
-        let expr = self.parse_expression(Precedence::Lowest)?; // Use enum precedence
+        let expr = self.parse_expression(Lowest)?; // Use enum precedence
         self.expect_and_consume(Token::Semicolon)?;
         Ok(Statement::ExpressionStmt(expr))
     }
@@ -350,7 +367,8 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_prefix()?;
 
         // Loop while next token is infix and has higher precedence
-        while precedence < token_precedence(&self.current_token) { // Check CURRENT token now
+        while precedence < token_precedence(&self.current_token) {
+            // Check CURRENT token now
             // Check if current token is a binary/comparison operator OR function call start
             match self.current_token {
                 // Arithmetic Binary Ops
@@ -359,29 +377,74 @@ impl<'a> Parser<'a> {
                     let current_precedence = token_precedence(&self.current_token);
                     self.next_token(); // Consume operator
                     let right = self.parse_expression(current_precedence)?;
-                    left = Expression::BinaryOp { op, left: Box::new(left), right: Box::new(right) };
+                    left = Expression::BinaryOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
                 }
                 // Comparison Ops
-                Token::LessThan | Token::GreaterThan | Token::Equal | Token::NotEqual | Token::LessEqual | Token::GreaterEqual => {
+                Token::LessThan
+                | Token::GreaterThan
+                | Token::Equal
+                | Token::NotEqual
+                | Token::LessEqual
+                | Token::GreaterEqual => {
                     let op = token_to_comparison_op(&self.current_token).unwrap(); // Known to be Some
                     let current_precedence = token_precedence(&self.current_token);
                     self.next_token(); // Consume operator
                     let right = self.parse_expression(current_precedence)?;
-                    left = Expression::ComparisonOp { op, left: Box::new(left), right: Box::new(right) };
+                    left = Expression::ComparisonOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
                 }
                 // Function Call
                 Token::LParen => {
                     // Need to check if 'left' was actually a Variable
                     let func_name = match left {
                         Expression::Variable(name) => name,
-                        _ => return Err(ParseError::UnexpectedToken {
-                            expected: "function name".to_string(),
-                            found: self.current_token.clone(),
-                        }),
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "function name".to_string(),
+                                found: self.current_token.clone(),
+                            })
+                        }
                     };
                     self.next_token(); // Consume '('
                     let args = self.parse_argument_list()?; // Returns vec of expressions
-                    left = Expression::FunctionCall { name: func_name, args };
+                    left = Expression::FunctionCall {
+                        name: func_name,
+                        args,
+                    };
+                }
+                Token::Assign => {
+                    // Ensure the left side is a valid assignment target (Identifier/Variable)
+                    let target_name = match left {
+                        Expression::Variable(name) => name,
+                        // Add cases later for field access (obj.field = ...) or array index (arr[i] = ...)
+                        _ => {
+                            return Err(ParseError::InvalidAssignmentTarget(format!("{:?}", left)))
+                        }
+                    };
+
+                    let current_precedence = token_precedence(&self.current_token);
+                    self.next_token(); // Consume '='
+
+                    // Assignment is right-associative, so parse RHS with slightly lower precedence
+                    // (or equal precedence if definition strictly requires right-associativity handling)
+                    // Let's use current_precedence for now, assuming basic handling.
+                    // To be truly right-associative (x = y = 5 -> x = (y = 5)), the recursive
+                    // call might need precedence `current_precedence - 1` or similar adjustment.
+                    // Sticking with `current_precedence` makes it effectively non-associative here,
+                    // requiring parentheses for chained assignment like `x = (y = 5);`.
+                    let value = self.parse_expression(current_precedence)?;
+
+                    left = Expression::Assignment {
+                        target: target_name,
+                        value: Box::new(value),
+                    };
                 }
                 // Not an operator we handle infix at this precedence
                 _ => break,
@@ -392,6 +455,8 @@ impl<'a> Parser<'a> {
 
     // Parses prefix elements: literals, identifiers, grouped expr, maybe unary later
     fn parse_prefix(&mut self) -> ParseResult<Expression> {
+        println!("Parsing Prefix");
+        let current_token_clone = self.current_token.clone();
         let result = match self.current_token.clone() {
             Token::FloatNum(value) => Ok(Expression::FloatLiteral(value)),
             Token::IntNum(value) => Ok(Expression::IntLiteral(value)),
@@ -405,7 +470,8 @@ impl<'a> Parser<'a> {
             }),
         };
         // Consume the token associated with the prefix element only if successful
-        if result.is_ok() {
+        // and only if its not a () block, because the parse_group_expression function already consumes the RParen )!
+        if result.is_ok() && !matches!(current_token_clone, Token::LParen) {
             self.next_token();
         }
         result
@@ -413,8 +479,10 @@ impl<'a> Parser<'a> {
 
     // Parses `( EXPR )` - consumes the initial `(` and final `)`
     fn parse_grouped_expression(&mut self) -> ParseResult<Expression> {
-        // LParen consumed by caller (parse_prefix)
-        let expr = self.parse_expression(Precedence::Lowest)?; // Parse inner expr
+        println!("Parsing Grouped Expression");
+        self.next_token();
+        println!("current_token: {:?}", self.current_token);
+        let expr = self.parse_expression(Lowest)?; // Parse inner expr
         self.expect_and_consume(Token::RParen)?; // Expect and consume ')'
         Ok(expr)
     }
@@ -583,7 +651,7 @@ mod tests {
             "Expected exactly one parse error for input: {}",
             input
         ); // Add message
-        // The error is UnexpectedToken when parse_prefix expects an expression after '=' but finds ';'
+           // The error is UnexpectedToken when parse_prefix expects an expression after '=' but finds ';'
         assert!(
             matches!(errors[0], ParseError::UnexpectedToken{ ref found, .. } if found == &Token::Semicolon ),
             "Unexpected error type or token: {:?}",
@@ -626,7 +694,9 @@ mod tests {
 
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::FunctionDef { name, params, body, .. } => {
+            FunctionDef {
+                name, params, body, ..
+            } => {
                 assert_eq!(name, "main");
                 assert!(params.is_empty());
                 assert_eq!(body.statements.len(), 1);
@@ -645,7 +715,9 @@ mod tests {
 
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::FunctionDef { name, params, body, .. } => {
+            FunctionDef {
+                name, params, body, ..
+            } => {
                 assert_eq!(name, "add");
                 // assert_eq!(params, &["a".to_string(), "b".to_string()]);
                 assert_eq!(body.statements.len(), 2);
@@ -668,7 +740,7 @@ mod tests {
 
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::ExpressionStmt(Expression::FunctionCall { name, args }) => {
+            ExpressionStmt(FunctionCall { name, args }) => {
                 assert_eq!(name, "my_func");
                 assert!(args.is_empty());
             }
@@ -685,7 +757,7 @@ mod tests {
 
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::ExpressionStmt(Expression::FunctionCall { name, args }) => {
+            ExpressionStmt(FunctionCall { name, args }) => {
                 assert_eq!(name, "add");
                 assert_eq!(args.len(), 2);
                 assert_eq!(args[0], num(1.0));
@@ -703,7 +775,7 @@ mod tests {
         let program = parser.parse_program().unwrap();
 
         assert_eq!(program.statements.len(), 1);
-        let expected_call = Expression::FunctionCall {
+        let expected_call = FunctionCall {
             name: "compute".to_string(),
             args: vec![var("x"), num(5.0)],
         };
@@ -747,16 +819,16 @@ mod tests {
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         // Expected: (a > 5) == true
-        let expected_expr = Expression::ComparisonOp {
+        let expected_expr = ComparisonOp {
             op: ComparisonOperator::Equal,
-            left: Box::new(Expression::ComparisonOp {
+            left: Box::new(ComparisonOp {
                 op: ComparisonOperator::GreaterThan,
-                left: Box::new(Expression::Variable("a".to_string())),
-                right: Box::new(Expression::IntLiteral(5)), // Assume 5 is int
+                left: Box::new(Variable("a".to_string())),
+                right: Box::new(IntLiteral(5)), // Assume 5 is int
             }),
-            right: Box::new(Expression::BoolLiteral(true)),
+            right: Box::new(BoolLiteral(true)),
         };
-        assert_eq!(program.statements[0], Statement::ExpressionStmt(expected_expr));
+        assert_eq!(program.statements[0], ExpressionStmt(expected_expr));
     }
 
     #[test]
@@ -766,10 +838,55 @@ mod tests {
         let mut parser = Parser::new(lexer);
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
-        assert_eq!(program.statements[0], Statement::LetBinding {
-            name: "count".to_string(),
-            type_ann: Some(Type::Int),
-            value: Expression::IntLiteral(100)
-        });
+        assert_eq!(
+            program.statements[0],
+            LetBinding {
+                name: "count".to_string(),
+                type_ann: Some(Type::Int),
+                value: IntLiteral(100)
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_var_statement() {
+        let input = "var counter: int = 0;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        assert_eq!(
+            program.statements[0],
+            VarBinding {
+                name: "counter".to_string(),
+                type_ann: Some(Type::Int),
+                value: IntLiteral(0)
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_assignment_expression() {
+        let input = "x = y + 1;"; // Assign result of y+1 to x
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            ExpressionStmt(Assignment { target, value }) => {
+                assert_eq!(target, "x");
+                // Check value is BinaryOp { Add, Variable("y"), IntLiteral(1) }
+                match &**value {
+                    // Deref the Box
+                    BinaryOp { op, left, right } => {
+                        assert_eq!(*op, Add);
+                        assert_eq!(*left, Box::new(Variable("y".to_string())));
+                        assert_eq!(*right, Box::new(IntLiteral(1)));
+                    }
+                    _ => panic!("Assignment value was not BinaryOp"),
+                }
+            }
+            _ => panic!("Expected Assignment Expression Statement"),
+        }
     }
 }

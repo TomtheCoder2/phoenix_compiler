@@ -17,6 +17,12 @@ pub enum Statement {
         type_ann: Option<Type>,
         value: Expression,
     },
+    // Mutable binding
+    VarBinding { 
+        name: String,
+        type_ann: Option<Type>,
+        value: Expression,
+    },
     ExpressionStmt(Expression),
     FunctionDef {
         name: String,
@@ -37,6 +43,11 @@ pub enum Expression {
 
     // Variable & Call
     Variable(String),
+    // Assignment: target = value
+    Assignment { // Added
+        target: String, // Name of variable being assigned to
+        value: Box<Expression>,
+    },
     FunctionCall {
         name: String,
         args: Vec<Expression>,

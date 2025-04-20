@@ -24,20 +24,22 @@ use std::process::Command;
 
 fn main() {
     let input = r#"
-        let x: int = 10;
-        let y: float = 2.5; // Keep floats too
-        let is_greater: bool = x > 5;
+        var counter: int = 0;
+        let limit: int = 5;
+        // let immutable: int = 100; // Example immutable
 
-        print(x * 3); // int print: 30
-        print(y / 2.0); // float print: 1.25
-        print(2.3);
-        print(10);
-        print(is_greater); // bool print: true
-        print(x == 10); // bool print: true
-        print(x < 9);  // bool print: false
+        print(counter); // 0
 
-        // Type mismatch (will error in current codegen):
-        print(x + y);
+        counter = counter + 1;
+        print(counter); // 1
+
+        counter = counter + limit;
+        print(counter); // 6
+
+        // immutable = 50; // This should fail if uncommented (after adding check)
+
+        let result = counter * 2; // Use mutable var in expression
+        print(result); // 12
     "#;
 
     let output_filename = "output.o"; // Name for the object file
