@@ -1226,6 +1226,10 @@ mod tests {
                             assert!(final_expression.is_some());
                             // Assuming negative numbers parsed correctly or unary minus exists
                             // match final_expression { /* ... Check for -1 ... */ }
+                            match final_expression {
+                                Some(e) => assert_eq!(**e, IntLiteral(2)), // Check final expr
+                                None => panic!("Expected final expression"),
+                            }
                         }
                         _ => panic!("Else branch not a Block expression"),
                     }

@@ -9,6 +9,7 @@ use toylang_compiler::codegen::Compiler;
 use toylang_compiler::lexer::Lexer;
 use toylang_compiler::utils::link_object_file;
 use toylang_compiler::parser::Parser;
+use toylang_compiler::typechecker::TypeChecker;
 // Add import
 
 // Remove JIT type alias if not used
@@ -75,6 +76,17 @@ fn main() {
             return;
         }
     };
+
+    // --- >>> Type Checking <<< ---
+    let mut type_checker = TypeChecker::new();
+    if let Err(errors) = type_checker.check_program(&program) {
+        eprintln!("\nType Checking Errors:");
+        for e in errors {
+            eprintln!("- {}", e);
+        }
+        return; // Stop compilation on type errors
+    }
+    println!("\nType Checking Successful.");
 
     // --- Emit Object File ---
     let obj_path = Path::new(output_filename);

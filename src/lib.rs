@@ -6,6 +6,8 @@ pub mod parser;
 pub mod token;
 pub mod types;
 pub mod utils;
+mod symbol_table;
+pub mod typechecker;
 
 #[no_mangle]
 pub extern "C" fn print_f64_wrapper(value: f64) {

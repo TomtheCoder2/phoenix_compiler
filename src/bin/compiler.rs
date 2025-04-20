@@ -5,6 +5,7 @@ use std::path::Path;
 use toylang_compiler::codegen::Compiler;
 use toylang_compiler::lexer::Lexer;
 use toylang_compiler::parser::Parser as ToyParser;
+use toylang_compiler::typechecker::TypeChecker;
 use toylang_compiler::utils::link_object_file;
 
 #[derive(Parser, Debug)]
@@ -59,6 +60,26 @@ fn main() {
             return;
         }
     };
+    
+    // write the ast to file if verbose
+    if args.verbose {
+        let ast_file_path = input_path.with_extension("ast");
+        match fs::write(&ast_file_path, format!("{:#?}", program)) {
+            Ok(_) => println!("AST written to: {}", ast_file_path.display()),
+            Err(e) => eprintln!("Error writing AST to file: {}", e),
+        }
+    }
+
+    // --- >>> Type Checking <<< ---
+    let mut type_checker = TypeChecker::new();
+    if let Err(errors) = type_checker.check_program(&program) {
+        eprintln!("\nType Checking Errors:");
+        for e in errors {
+            eprintln!("- {}", e);
+        }
+        return; // Stop compilation on type errors
+    }
+    println!("\nType Checking Successful.");
 
     // Generate LLVM IR
     let context = Context::create();

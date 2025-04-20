@@ -13,6 +13,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
 use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::values::AnyValue;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
@@ -655,7 +656,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // Merge Block and PHI Node
                 self.builder.position_at_end(merge_bb);
-                if then_val.get_type() != else_val.get_type() { /* Error: type mismatch */ }
+                if then_val.get_type() != else_val.get_type() { 
+                    return Err(CodeGenError::InvalidType(format!(
+                        "If branches must have the same type: then {:?}, else {:?}",
+                        then_val.get_type(),
+                        else_val.get_type()
+                    )));
+                }
                 let phi_type = then_val.get_type();
                 let phi_node = match self.builder.build_phi(phi_type, "ifexpr_tmp") {
                     Ok(val) => val,
@@ -907,7 +914,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 return_type_ann,
                 body,
             } => {
-                if self.functions.contains_key(name) { /* ... Redefinition error ... */ }
+                if self.functions.contains_key(name) { // Function already defined
+                    return Err(CodeGenError::FunctionRedefinition(name.clone()));
+                }
 
                 // --- Determine Param and Return Types ---
                 // Use annotations, default to float for now if missing (NEEDS TYPE CHECKING)
@@ -971,7 +980,16 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // --- Compile Function Body ---
                 let mut last_body_val: Option<BasicValueEnum<'ctx>> = None;
                 let mut body_compile_err: Option<CodeGenError> = None;
-                for body_stmt in &body.statements { /* ... compile, track last_body_val ... */ }
+                for body_stmt in &body.statements { 
+                    match self.compile_statement(body_stmt) {
+                        Ok(Some(val)) => last_body_val = Some(val),
+                        Ok(None) => {} // Ignore None values (e.g., let bindings)
+                        Err(e) => {
+                            body_compile_err = Some(e);
+                            break; // Stop on first error
+                        }
+                    }
+                }   
 
                 // --- Build Return (check type) ---
                 if body_compile_err.is_none() {
@@ -1011,10 +1029,20 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // --- Handle errors / Verification / Optimization ---
                 // ... (similar logic, run FPM, check verification) ...
                 if body_compile_err.is_some() || !function.verify(true) {
-                    /* ... handle error ... */
+                    // Handle function verification failure
+                    if let Some(err) = body_compile_err {
+                        return Err(err);
+                    }
+                    return Err(CodeGenError::LlvmError(
+                        "Function verification failed".to_string(),
+                    ));
                 }
                 self.fpm.run_on(&function);
-                if !function.verify(true) { /* ... handle error ... */ }
+                if !function.verify(true) { 
+                    return Err(CodeGenError::LlvmError(
+                        "Function verification failed after optimization".to_string(),
+                    ));
+                }
 
                 Ok(None)
             } // End FunctionDef
@@ -1209,5 +1237,149 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             .map_err(|e| CodeGenError::LlvmError(format!("Failed to write object file: {}", e)))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inkwell::context::Context;
+    use std::path::Path;
+
+    #[test]
+    
+    fn compile_float_literal_expression() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+
+        let expr = Expression::FloatLiteral(5.43);
+        let result = compiler.compile_expression(&expr);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            result
+                .unwrap()
+                .into_float_value()
+                .print_to_string()
+                .to_string(),
+            "double 5.430000e+00"
+        );
+    }
+
+    #[test]
+    fn compile_undefined_variable_error() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+        let expr = Expression::Variable("x".to_string());
+        let result = compiler.compile_expression(&expr);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            CodeGenError::UndefinedVariable("x".to_string())
+        );
+    }
+
+    #[test]
+    fn compile_binary_operation_with_type_mismatch() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+        let expr = Expression::BinaryOp {
+            op: BinaryOperator::Add,
+            left: Box::new(Expression::IntLiteral(5)),
+            right: Box::new(Expression::FloatLiteral(5.43)),
+        };
+        let result = compiler.compile_expression(&expr);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            CodeGenError::InvalidBinaryOperation(_)
+        ));
+    }
+
+    #[test]
+    fn emit_object_file_success() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let compiler = Compiler::new(&context, &builder, &module);
+
+        let output_path = Path::new("test_output.o");
+        let result = compiler.emit_object_file(output_path);
+
+        assert!(result.is_ok());
+        assert!(output_path.exists());
+        std::fs::remove_file(output_path).unwrap();
+    }
+
+    #[test]
+    fn emit_object_file_invalid_path() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let compiler = Compiler::new(&context, &builder, &module);
+
+        let output_path = Path::new("/invalid_path/test_output.o");
+        let result = compiler.emit_object_file(output_path);
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CodeGenError::LlvmError(_)));
+    }
+    
+    #[test]
+    fn compile_function_definition() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+    
+        // Create a simple function: function add(a: Int, b: Int) -> Int { a + b }
+        let params = vec![
+            ("a".to_string(), Some(Type::Int)),
+            ("b".to_string(), Some(Type::Int)),
+        ];
+        
+        let body = Program {
+            statements: vec![
+                Statement::ExpressionStmt(Expression::BinaryOp {
+                    op: BinaryOperator::Add,
+                    left: Box::new(Expression::Variable("a".to_string())),
+                    right: Box::new(Expression::Variable("b".to_string())),
+                }),
+            ],
+        };
+    
+        let func_def = Statement::FunctionDef {
+            name: "add".to_string(),
+            params,
+            return_type_ann: Some(Type::Int),
+            body: Box::new(body),
+        };
+    
+        // Compile the function definition
+        let result = compiler.compile_statement(&func_def);
+        
+        // Verify compilation succeeded
+        assert!(result.is_ok());
+        
+        // Check that the function was added to the compiler's function map
+        assert!(compiler.functions.contains_key("add"));
+        
+        // Verify the function signature is correct
+        let (param_types, return_type, _) = compiler.functions.get("add").unwrap();
+        assert_eq!(param_types.len(), 2);
+        assert_eq!(param_types[0], Type::Int);
+        assert_eq!(param_types[1], Type::Int);
+        assert_eq!(*return_type, Type::Int);
     }
 }
