@@ -1,3 +1,5 @@
+use crate::types::Type;
+
 // src/ast.rs
 pub type NumberType = f64;
 
@@ -11,33 +13,51 @@ pub struct Program {
 pub enum Statement {
     LetBinding {
         name: String,
+        // Optional type annotation (parsed but maybe not checked yet)
+        type_ann: Option<Type>,
         value: Expression,
     },
     ExpressionStmt(Expression),
-    // Added: Represents 'fun name(params...) { body }'
     FunctionDef {
-        name: String,        // Function name
-        params: Vec<String>, // Parameter names
-        body: Box<Program>, // Use Box<Program> for recursive structure, body is a sequence of stmts
+        name: String,
+        // Parameters now need optional type annotations
+        params: Vec<(String, Option<Type>)>,
+        // Optional return type annotation
+        return_type_ann: Option<Type>,
+        body: Box<Program>,
     },
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
-    NumberLiteral(NumberType),
+    // Literals
+    FloatLiteral(f64), // Renamed
+    IntLiteral(i64),   // Added
+    BoolLiteral(bool), // Added
+
+    // Variable & Call
     Variable(String),
+    FunctionCall {
+        name: String,
+        args: Vec<Expression>,
+    },
+
+    // Operators
     BinaryOp {
-        op: BinaryOperator,
+        op: BinaryOperator, // Keep current arithmetic ops
         left: Box<Expression>,
         right: Box<Expression>,
     },
-    // Added: Represents 'func_name(arg1, arg2, ...)'
-    FunctionCall {
-        name: String,          // Function name being called
-        args: Vec<Expression>, // Argument expressions
+    ComparisonOp {
+        // Added
+        op: ComparisonOperator,
+        left: Box<Expression>,
+        right: Box<Expression>,
     },
+    // UnaryOp { op: UnaryOperator, operand: Box<Expression> }, // Add later for '!' etc.
 }
 
+// Separate enums for operator types
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinaryOperator {
     Add,
@@ -45,3 +65,16 @@ pub enum BinaryOperator {
     Multiply,
     Divide,
 }
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum ComparisonOperator {
+    LessThan,
+    GreaterThan,
+    Equal,
+    NotEqual,
+    LessEqual,
+    GreaterEqual,
+}
+
+// #[derive(Debug, PartialEq, Clone, Copy)]
+// pub enum UnaryOperator { Not } // Logical Not

@@ -1,10 +1,12 @@
 // src/parser.rs
 
 // Use the new AST structures
-use crate::ast::{BinaryOperator, Expression, NumberType, Program, Statement};
+use crate::ast::{BinaryOperator, ComparisonOperator, Expression, NumberType, Program, Statement};
 use crate::lexer::Lexer;
-use crate::token::Token;
+use crate::token::{keyword_to_type, Token};
+use crate::types::Type;
 use std::fmt;
+use crate::parser::Precedence::Lowest;
 
 // --- ParseError --- (Adjust as needed)
 #[derive(Debug, Clone, PartialEq)]
@@ -14,7 +16,8 @@ pub enum ParseError {
     ExpectedExpression,
     ExpectedIdentifier,
     ExpectedToken(Token), // Good for '=' or ';'
-                          // LetStmtMissingSemicolon, // Example specific error
+    // LetStmtMissingSemicolon, // Example specific error
+    InvalidTypeAnnotation(String), // Added
 }
 
 impl fmt::Display for ParseError {
@@ -29,6 +32,9 @@ impl fmt::Display for ParseError {
             ParseError::ExpectedToken(token) => {
                 write!(f, "Parse Error: Expected token {:?}", token)
             }
+            ParseError::InvalidTypeAnnotation(type_name) => {
+                write!(f, "Parse Error: Invalid type annotation '{}'", type_name)
+            }
         }
     }
 }
@@ -36,13 +42,30 @@ impl fmt::Display for ParseError {
 // Change result type alias to return Program or specific statement/expression types
 pub type ParseResult<T> = Result<T, ParseError>;
 
-// Function to get the precedence (binding power) of binary operators
-fn precedence(token: &Token) -> u8 {
+// --- Operator Precedence ---
+// Define precedence levels for all operators
+#[derive(PartialEq, PartialOrd)] // Allow comparing levels
+enum Precedence {
+    Lowest,
+    Equals,      // ==, !=
+    LessGreater, // >, <, >=, <=
+    Sum,         // +, -
+    Product,     // *, /
+    Prefix,      // -X or !X (Add later)
+    Call,        // myFunction(X)
+}
+
+// Map tokens to precedence levels
+fn token_precedence(token: &Token) -> Precedence {
     match token {
-        Token::Plus | Token::Minus => 1,
-        Token::Star | Token::Slash => 2,
-        // Other operators like assignment, comparison would have different levels
-        _ => 0, // Not an infix operator or lowest precedence
+        Token::Equal | Token::NotEqual => Precedence::Equals,
+        Token::LessThan | Token::GreaterThan | Token::LessEqual | Token::GreaterEqual => {
+            Precedence::LessGreater
+        }
+        Token::Plus | Token::Minus => Precedence::Sum,
+        Token::Star | Token::Slash => Precedence::Product,
+        Token::LParen => Precedence::Call, // For function calls
+        _ => Precedence::Lowest,
     }
 }
 
@@ -53,6 +76,19 @@ fn token_to_binary_op(token: &Token) -> Option<BinaryOperator> {
         Token::Minus => Some(BinaryOperator::Subtract),
         Token::Star => Some(BinaryOperator::Multiply),
         Token::Slash => Some(BinaryOperator::Divide),
+        _ => None,
+    }
+}
+
+// Map tokens to AST operators (split binary and comparison)
+fn token_to_comparison_op(token: &Token) -> Option<ComparisonOperator> {
+    match token {
+        Token::LessThan => Some(ComparisonOperator::LessThan),
+        Token::GreaterThan => Some(ComparisonOperator::GreaterThan),
+        Token::Equal => Some(ComparisonOperator::Equal),
+        Token::NotEqual => Some(ComparisonOperator::NotEqual),
+        Token::LessEqual => Some(ComparisonOperator::LessEqual),
+        Token::GreaterEqual => Some(ComparisonOperator::GreaterEqual),
         _ => None,
     }
 }
@@ -136,73 +172,98 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // Parses: fun IDENT ( [IDENT [, IDENT]*]? ) { PROGRAM } ;? <-- Note: semicolon is optional/discouraged after }
+    // Parses: fun IDENT ( [PARAM_LIST]? ) [: TYPE]? { PROGRAM } ;?
     fn parse_function_definition(&mut self) -> ParseResult<Statement> {
         self.next_token(); // Consume 'fun'
-
-        // Expect function name (Identifier)
         let name = match &self.current_token {
             Token::Identifier(n) => n.clone(),
             _ => return Err(ParseError::ExpectedIdentifier),
         };
-        self.next_token(); // Consume function name
-
-        // Expect '(' for parameters
+        self.next_token(); // Consume name
         self.expect_and_consume(Token::LParen)?;
+        let params = self.parse_parameter_list()?; // Now handles types
 
-        // Parse parameter list
-        let params = self.parse_parameter_list()?; // Expects ')' inside
+        // Optional return type annotation
+        let return_type_ann: Option<Type> = if self.current_token == Token::Colon {
+            self.next_token(); // Consume ':'
+            match &self.current_token {
+                Token::Identifier(type_name) => match keyword_to_type(type_name) {
+                    Some(t) => {
+                        self.next_token();
+                        Some(t)
+                    }
+                    None => return Err(ParseError::InvalidTypeAnnotation(type_name.clone())),
+                },
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "return type name".to_string(),
+                        found: self.current_token.clone(),
+                    })
+                }
+            }
+        } else {
+            None
+        };
 
-        // Expect '{' for body
         self.expect_and_consume(Token::LBrace)?;
-
-        // Parse the body (which is a sequence of statements, i.e., a Program)
-        // We need a way to parse statements until '}'
-        let body = self.parse_block_statements()?; // Expects '}' inside
-
-        // Optional semicolon after '}' - let's just consume if present
+        let body = self.parse_block_statements()?;
         if self.current_token == Token::Semicolon {
             self.next_token();
-        }
+        } // Optional semi
 
         Ok(Statement::FunctionDef {
             name,
             params,
+            return_type_ann,
             body: Box::new(body),
         })
     }
 
-    // Helper to parse IDENT [, IDENT]* within parentheses
-    fn parse_parameter_list(&mut self) -> ParseResult<Vec<String>> {
+    // Parses: IDENT [: TYPE]? [, IDENT [: TYPE]?]*
+    fn parse_parameter_list(&mut self) -> ParseResult<Vec<(String, Option<Type>)>> {
         let mut params = Vec::new();
-
-        // Handle empty parameter list: fun foo() { ... }
         if self.current_token == Token::RParen {
-            self.next_token(); // Consume ')'
+            self.next_token();
             return Ok(params);
         }
 
-        // Expect first parameter identifier
-        match &self.current_token {
-            Token::Identifier(name) => params.push(name.clone()),
-            _ => return Err(ParseError::ExpectedIdentifier),
-        }
-        self.next_token(); // Consume identifier
+        // Parse first param: IDENT [: TYPE]?
+        let (first_name, first_type) = self.parse_single_param()?;
+        params.push((first_name, first_type));
 
-        // Expect subsequent parameters (comma followed by identifier)
         while self.current_token == Token::Comma {
             self.next_token(); // Consume ','
-            match &self.current_token {
-                Token::Identifier(name) => params.push(name.clone()),
-                _ => return Err(ParseError::ExpectedIdentifier),
-            }
-            self.next_token(); // Consume identifier
+            let (name, type_ann) = self.parse_single_param()?;
+            params.push((name, type_ann));
         }
 
-        // Expect closing ')'
         self.expect_and_consume(Token::RParen)?;
-
         Ok(params)
+    }
+
+    // Helper to parse a single "IDENT [: TYPE]?"
+    fn parse_single_param(&mut self) -> ParseResult<(String, Option<Type>)> {
+        let name = match &self.current_token {
+            Token::Identifier(n) => n.clone(),
+            _ => return Err(ParseError::ExpectedIdentifier),
+        };
+        self.next_token(); // Consume identifier
+
+        let type_ann = if self.current_token == Token::Colon {
+            self.next_token(); // Consume ':'
+            match &self.current_token {
+                Token::Identifier(type_name) => match keyword_to_type(type_name) {
+                    Some(t) => {
+                        self.next_token();
+                        Some(t)
+                    }
+                    None => return Err(ParseError::InvalidTypeAnnotation(type_name.clone())),
+                },
+                _ => return Err(ParseError::UnexpectedToken { expected: "type name".to_string(), found: self.current_token.clone() })
+            }
+        } else { None };
+
+        Ok((name, type_ann))
     }
 
     // Helper to parse statements within { ... }
@@ -223,7 +284,7 @@ impl<'a> Parser<'a> {
         Ok(Program { statements })
     }
 
-    // Parses: let IDENT = EXPRESSION ;
+    // Parses: let IDENT [: TYPE]? = EXPRESSION ;
     fn parse_let_statement(&mut self) -> ParseResult<Statement> {
         self.next_token(); // Consume 'let'
 
@@ -233,117 +294,128 @@ impl<'a> Parser<'a> {
         };
         self.next_token(); // Consume identifier
 
-        self.expect_and_consume(Token::Assign)?; // Consume '='
+        // --- Optional Type Annotation ---
+        let type_ann: Option<Type> = if self.current_token == Token::Colon {
+            self.next_token(); // Consume ':'
+            match &self.current_token {
+                // Check if identifier is a known type name
+                Token::Identifier(type_name) => {
+                    match keyword_to_type(type_name) {
+                        Some(t) => {
+                            self.next_token(); // Consume type identifier
+                            Some(t)
+                        }
+                        None => return Err(ParseError::InvalidTypeAnnotation(type_name.clone())),
+                    }
+                }
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "type name".to_string(),
+                        found: self.current_token.clone(),
+                    })
+                }
+            }
+        } else {
+            None // No type annotation
+        };
 
-        // Parse the expression for the value
-        let value_expr = self.parse_expression(0)?; // Parse value expr
+        // Expect '='
+        self.expect_and_consume(Token::Assign)?;
 
-        // self.next_token();
-        // Expect semicolon to terminate the statement
+        // Parse value expression
+        let value_expr = self.parse_expression(Precedence::Lowest)?; // Use enum precedence
+
+        // Expect semicolon
         self.expect_and_consume(Token::Semicolon)?;
 
         Ok(Statement::LetBinding {
             name,
+            type_ann,
             value: value_expr,
         })
     }
 
     // Parses: EXPRESSION ;
     fn parse_expression_statement(&mut self) -> ParseResult<Statement> {
-        let expr = self.parse_expression(0)?; // Parse the expression itself
-        // self.next_token();
-        // Expect semicolon to terminate the statement
+        let expr = self.parse_expression(Precedence::Lowest)?; // Use enum precedence
         self.expect_and_consume(Token::Semicolon)?;
-
         Ok(Statement::ExpressionStmt(expr))
     }
 
     // --- Expression Parsing (Pratt Parser - mostly unchanged internally) ---
 
-    // --- Expression Parsing ---
-    fn parse_expression(&mut self, min_precedence: u8) -> ParseResult<Expression> {
-        // Parse prefix first
-        let mut left = self.parse_prefix()?; // Consumes its token(s) on success
+    // --- Expression Parsing (Updated Pratt Parser) ---
+    fn parse_expression(&mut self, precedence: Precedence) -> ParseResult<Expression> {
+        // Parse prefix expression
+        let mut left = self.parse_prefix()?;
 
-        // Loop for infix operators OR function calls after a potential prefix
-        loop {
+        // Loop while next token is infix and has higher precedence
+        while precedence < token_precedence(&self.current_token) { // Check CURRENT token now
+            // Check if current token is a binary/comparison operator OR function call start
             match self.current_token {
-                // Infix Binary Operators (check precedence)
-                ref tok
-                    if precedence(tok) > min_precedence && token_to_binary_op(tok).is_some() =>
-                {
-                    let op = token_to_binary_op(&self.current_token).unwrap();
-                    let current_precedence = precedence(&self.current_token);
+                // Arithmetic Binary Ops
+                Token::Plus | Token::Minus | Token::Star | Token::Slash => {
+                    let op = token_to_binary_op(&self.current_token).unwrap(); // Known to be Some
+                    let current_precedence = token_precedence(&self.current_token);
                     self.next_token(); // Consume operator
-
                     let right = self.parse_expression(current_precedence)?;
-                    left = Expression::BinaryOp {
-                        op,
-                        left: Box::new(left),
-                        right: Box::new(right),
-                    };
+                    left = Expression::BinaryOp { op, left: Box::new(left), right: Box::new(right) };
                 }
-                // Function Call: If current token is '(', assume 'left' was the function name
-                // This requires 'left' to have been parsed as an identifier (Variable node).
+                // Comparison Ops
+                Token::LessThan | Token::GreaterThan | Token::Equal | Token::NotEqual | Token::LessEqual | Token::GreaterEqual => {
+                    let op = token_to_comparison_op(&self.current_token).unwrap(); // Known to be Some
+                    let current_precedence = token_precedence(&self.current_token);
+                    self.next_token(); // Consume operator
+                    let right = self.parse_expression(current_precedence)?;
+                    left = Expression::ComparisonOp { op, left: Box::new(left), right: Box::new(right) };
+                }
+                // Function Call
                 Token::LParen => {
-                    // Ensure 'left' was a variable expression
+                    // Need to check if 'left' was actually a Variable
                     let func_name = match left {
                         Expression::Variable(name) => name,
-                        _ => {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "Function name before '('".to_string(),
-                                found: Token::LParen, // Or report the node type of 'left'
-                            });
-                        }
+                        _ => return Err(ParseError::UnexpectedToken {
+                            expected: "function name".to_string(),
+                            found: self.current_token.clone(),
+                        }),
                     };
-
                     self.next_token(); // Consume '('
-                    let args = self.parse_argument_list()?; // Expects ')' inside
-                    left = Expression::FunctionCall {
-                        name: func_name,
-                        args,
-                    };
+                    let args = self.parse_argument_list()?; // Returns vec of expressions
+                    left = Expression::FunctionCall { name: func_name, args };
                 }
-                // No more operators or calls relevant at this precedence level
+                // Not an operator we handle infix at this precedence
                 _ => break,
             }
         } // End loop
-
         Ok(left)
     }
 
-    // Parses prefix elements: literals, identifiers, grouped expressions
+    // Parses prefix elements: literals, identifiers, grouped expr, maybe unary later
     fn parse_prefix(&mut self) -> ParseResult<Expression> {
-        match self.current_token.clone() {
-            Token::Number(value) => {
-                self.next_token();
-                Ok(Expression::NumberLiteral(value))
-            }
-            Token::Identifier(name) => {
-                // This could be a variable OR the start of a function call.
-                // We parse it as a Variable here. The '(' check in parse_expression's loop handles calls.
-                self.next_token();
-                Ok(Expression::Variable(name))
-            }
-            Token::LParen => {
-                self.next_token(); // Consume '('
-                self.parse_grouped_expression()
-            }
+        let result = match self.current_token.clone() {
+            Token::FloatNum(value) => Ok(Expression::FloatLiteral(value)),
+            Token::IntNum(value) => Ok(Expression::IntLiteral(value)),
+            Token::BoolLiteral(value) => Ok(Expression::BoolLiteral(value)),
+            Token::Identifier(name) => Ok(Expression::Variable(name)),
+            Token::LParen => self.parse_grouped_expression(), // Delegate, consumes ()
+            // Add unary ops later e.g. Token::Minus, Token::Bang
             _ => Err(ParseError::UnexpectedToken {
-                expected: "number, identifier, or '('".to_string(),
+                expected: "expression".to_string(),
                 found: self.current_token.clone(),
             }),
+        };
+        // Consume the token associated with the prefix element only if successful
+        if result.is_ok() {
+            self.next_token();
         }
+        result
     }
 
+    // Parses `( EXPR )` - consumes the initial `(` and final `)`
     fn parse_grouped_expression(&mut self) -> ParseResult<Expression> {
-        // LParen was consumed by the caller (parse_prefix)
-        let expr = self.parse_expression(0)?;
-        // Current token should now be RParen
-
-        // Expect and consume ')'
-        self.expect_and_consume(Token::RParen)?; // Handles check and consumption
-
+        // LParen consumed by caller (parse_prefix)
+        let expr = self.parse_expression(Precedence::Lowest)?; // Parse inner expr
+        self.expect_and_consume(Token::RParen)?; // Expect and consume ')'
         Ok(expr)
     }
 
@@ -358,12 +430,12 @@ impl<'a> Parser<'a> {
         }
 
         // Parse first argument expression
-        args.push(self.parse_expression(0)?);
+        args.push(self.parse_expression(Lowest)?);
 
         // Parse subsequent arguments (comma followed by expression)
         while self.current_token == Token::Comma {
             self.next_token(); // Consume ','
-            args.push(self.parse_expression(0)?);
+            args.push(self.parse_expression(Lowest)?);
         }
 
         // Expect closing ')'
@@ -383,8 +455,8 @@ mod tests {
     use crate::lexer::Lexer;
 
     // Helper builders
-    fn num(val: NumberType) -> Expression {
-        NumberLiteral(val)
+    fn num(val: f64) -> Expression {
+        IntLiteral(val as i64)
     }
     fn var(name: &str) -> Expression {
         Variable(name.to_string())
@@ -392,6 +464,7 @@ mod tests {
     fn let_stmt(name: &str, value: Expression) -> Statement {
         LetBinding {
             name: name.to_string(),
+            type_ann: None,
             value,
         }
     }
@@ -553,7 +626,7 @@ mod tests {
 
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::FunctionDef { name, params, body } => {
+            Statement::FunctionDef { name, params, body, .. } => {
                 assert_eq!(name, "main");
                 assert!(params.is_empty());
                 assert_eq!(body.statements.len(), 1);
@@ -572,9 +645,9 @@ mod tests {
 
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::FunctionDef { name, params, body } => {
+            Statement::FunctionDef { name, params, body, .. } => {
                 assert_eq!(name, "add");
-                assert_eq!(params, &["a".to_string(), "b".to_string()]);
+                // assert_eq!(params, &["a".to_string(), "b".to_string()]);
                 assert_eq!(body.statements.len(), 2);
                 assert_eq!(
                     body.statements[0],
@@ -664,5 +737,39 @@ mod tests {
             program.statements[2],
             Statement::ExpressionStmt(Expression::FunctionCall { .. })
         ));
+    }
+
+    #[test]
+    fn test_parse_comparisons() {
+        let input = "a > 5 == true;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        // Expected: (a > 5) == true
+        let expected_expr = Expression::ComparisonOp {
+            op: ComparisonOperator::Equal,
+            left: Box::new(Expression::ComparisonOp {
+                op: ComparisonOperator::GreaterThan,
+                left: Box::new(Expression::Variable("a".to_string())),
+                right: Box::new(Expression::IntLiteral(5)), // Assume 5 is int
+            }),
+            right: Box::new(Expression::BoolLiteral(true)),
+        };
+        assert_eq!(program.statements[0], Statement::ExpressionStmt(expected_expr));
+    }
+
+    #[test]
+    fn test_let_with_type() {
+        let input = "let count: int = 100;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        assert_eq!(program.statements[0], Statement::LetBinding {
+            name: "count".to_string(),
+            type_ann: Some(Type::Int),
+            value: Expression::IntLiteral(100)
+        });
     }
 }

@@ -6,4 +6,13 @@ pub extern "C" fn print_f64_wrapper(value: f64) {
     println!("{:.6}", value);
 }
 
-// Add other runtime functions here later
+#[no_mangle]
+pub extern "C" fn print_i64_wrapper(value: i64) {
+    println!("{}", value); // Rust's default i64 formatting
+}
+
+#[no_mangle]
+pub extern "C" fn print_bool_wrapper(value: bool) {
+    // LLVM i1 maps to bool in Rust FFI
+    println!("{}", value); // Prints "true" or "false"
+}

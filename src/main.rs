@@ -5,6 +5,7 @@ mod codegen;
 mod lexer;
 mod parser;
 mod token;
+mod types;
 
 use codegen::Compiler;
 use lexer::Lexer;
@@ -21,16 +22,22 @@ use std::process::Command;
 // Remove JIT type alias if not used
 // type MainFuncSignature = unsafe extern "C" fn() -> f64;
 
-#[unsafe(no_mangle)]
-pub extern "C" fn print_f64_wrapper(value: f64) {
-    println!("{:.6}", value); // Or use libc::printf if you add the dependency
-}
-
 fn main() {
     let input = r#"
-        print(5);
-        print(6);
-        print(7);
+        let x: int = 10;
+        let y: float = 2.5; // Keep floats too
+        let is_greater: bool = x > 5;
+
+        print(x * 3); // int print: 30
+        print(y / 2.0); // float print: 1.25
+        print(2.3);
+        print(10);
+        print(is_greater); // bool print: true
+        print(x == 10); // bool print: true
+        print(x < 9);  // bool print: false
+
+        // Type mismatch (will error in current codegen):
+        print(x + y);
     "#;
 
     let output_filename = "output.o"; // Name for the object file
@@ -97,8 +104,6 @@ fn main() {
 /// Linking might succeed, but running it might crash or behave unexpectedly
 /// without a proper C entry point or runtime setup.
 /// For now, we just demonstrate the linking command.
-// src/main.rs -> link_object_file function
-
 fn link_object_file(obj_path: &Path, executable_name: &str) {
     println!("\n--- Linking ---");
     let linker = "clang";

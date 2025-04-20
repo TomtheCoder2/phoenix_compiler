@@ -1,5 +1,8 @@
 // src/token.rs
 
+use crate::types::Type;
+// Import our new Type enum
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     // Special Tokens
@@ -7,27 +10,59 @@ pub enum Token {
     Eof,
 
     // Literals
-    Number(f64),
+    FloatNum(f64),     // Renamed from Number
+    IntNum(i64),       // Added for integers
+    BoolLiteral(bool), // Added for true/false
 
     // Operators
-    Plus,        // '+'
-    Minus,       // '-'
-    Star,        // '*'
-    Slash,       // '/'
-    Assign,      // '='
+    Plus,  // '+'
+    Minus, // '-'
+    Star,  // '*'
+    Slash, // '/'
+    Assign, // '='
+
+    // Comparison Operators (Added)
+    LessThan,    // '<'
+    GreaterThan, // '>'
+    Equal,       // '=='
+    NotEqual,    // '!='
+    LessEqual,   // '<='
+    GreaterEqual,// '>='
+
+    // Logical Operators (Add later?)
+    // Bang, // '!' (Negation)
+    // And,  // '&&'
+    // Or,   // '||'
 
     // Delimiters
-    LParen,      // '('
-    RParen,      // ')'
-    Semicolon,   // ';'
-    Comma,       // ',' // Added
-    LBrace,      // '{' // Added
-    RBrace,      // '}' // Added
+    LParen,    // '('
+    RParen,    // ')'
+    Semicolon, // ';'
+    Comma,     // ','
+    LBrace,    // '{'
+    RBrace,    // '}'
+    Colon,     // ':' // Added for type annotations (e.g., let x: int)
 
     // Keywords
-    Let,         // 'let'
-    Fun,         // 'fun' // Added
+    Let, // 'let'
+    Fun, // 'fun'
+    True, // 'true' // Added
+    False, // 'false' // Added
+    // Type Keywords (optional, could use identifiers)
+    // TypeInt, // 'int'
+    // TypeFloat, // 'float'
+    // TypeBool, // 'bool'
 
     // Identifiers
-    Identifier(String), // e.g., "my_variable"
+    Identifier(String),
+}
+
+// Helper to maybe parse type names (optional, can rely on identifiers)
+pub fn keyword_to_type(ident: &str) -> Option<Type> {
+    match ident {
+        "int" => Some(Type::Int),
+        "float" => Some(Type::Float),
+        "bool" => Some(Type::Bool),
+        _ => None,
+    }
 }
