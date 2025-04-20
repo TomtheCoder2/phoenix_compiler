@@ -1,157 +1,161 @@
 Input:
 
-        let x: int = 10;
-        let y: float = 2.5; // Keep floats too
-        let is_greater: bool = x > 5;
+        var counter: int = 0;
+        let limit: int = 5;
+        // let immutable: int = 100; // Example immutable
 
-        print(x * 3); // int print: 30
-        print(y / 2.0); // float print: 1.25
-        print(2.3);
-        print(10);
-        print(is_greater); // bool print: true
-        print(x == 10); // bool print: true
-        print(x < 9);  // bool print: false
+        print(counter); // 0
 
-        // Type mismatch (will error in current codegen):
-        // print(x + y);
-    
+        counter = counter + 1;
+        print(counter); // 1
+
+        counter = counter + limit;
+        print(counter); // 6
+
+        // immutable = 50; // This should fail if uncommented (after adding check)
+
+        let result = counter * 2; // Use mutable var in expression
+        print(result); // 12
+
 AST:
 Program {
-    statements: [
-        LetBinding {
-            name: "x",
-            type_ann: Some(
-                Int,
-            ),
-            value: IntLiteral(
-                10,
-            ),
-        },
-        LetBinding {
-            name: "y",
-            type_ann: Some(
-                Float,
-            ),
-            value: FloatLiteral(
-                2.5,
-            ),
-        },
-        LetBinding {
-            name: "is_greater",
-            type_ann: Some(
-                Bool,
-            ),
-            value: ComparisonOp {
-                op: GreaterThan,
-                left: Variable(
-                    "x",
-                ),
-                right: IntLiteral(
-                    5,
-                ),
-            },
-        },
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    BinaryOp {
-                        op: Multiply,
-                        left: Variable(
-                            "x",
-                        ),
-                        right: IntLiteral(
-                            3,
-                        ),
-                    },
-                ],
-            },
-        ),
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    BinaryOp {
-                        op: Divide,
-                        left: Variable(
-                            "y",
-                        ),
-                        right: FloatLiteral(
-                            2.0,
-                        ),
-                    },
-                ],
-            },
-        ),
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    FloatLiteral(
-                        2.3,
-                    ),
-                ],
-            },
-        ),
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    IntLiteral(
-                        10,
-                    ),
-                ],
-            },
-        ),
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    Variable(
-                        "is_greater",
-                    ),
-                ],
-            },
-        ),
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    ComparisonOp {
-                        op: Equal,
-                        left: Variable(
-                            "x",
-                        ),
-                        right: IntLiteral(
-                            10,
-                        ),
-                    },
-                ],
-            },
-        ),
-        ExpressionStmt(
-            FunctionCall {
-                name: "print",
-                args: [
-                    ComparisonOp {
-                        op: LessThan,
-                        left: Variable(
-                            "x",
-                        ),
-                        right: IntLiteral(
-                            9,
-                        ),
-                    },
-                ],
-            },
-        ),
-    ],
+    ...
 }
 Optimizer changed function 'main'
 
 --- LLVM IR (Module) ---
+; ModuleID = 'toy_module_obj'
+source_filename = "toy_module_obj"
+
+define i32 @main() {
+entry:
+  call void @print_i64_wrapper(i64 0)
+  call void @print_i64_wrapper(i64 1)
+  call void @print_i64_wrapper(i64 6)
+  call void @print_i64_wrapper(i64 12)
+  ret i32 0
+}
+
+declare void @print_i64_wrapper(i64 %0)
 Emitting object file to: output.o
 Successfully emitted object file: output.o
 
 --- Linking ---
 Attempting to link output.o with library target/debug/libtoylang_compiler.a using clang
+ld: warning: no platform load command found in '/Users/janwi/PycharmProjects/toylang_compiler/output.o', assuming: macOS
+ld: warning: object file (/Users/janwi/PycharmProjects/toylang_compiler/target/debug/libtoylang_compiler.a[133](440ce9e453a4c8b4-target.o)) was built for newer 'macOS' version (15.4) than being linked (15.0)
+Undefined symbols for architecture arm64:
+  "_ZSTD_compress", referenced from:
+      llvm::compression::zstd::compress(llvm::ArrayRef<unsigned char>, llvm::SmallVectorImpl<unsigned char>&, int) in libtoylang_compiler.a[2499](Compression.cpp.o)
+  "_ZSTD_compressBound", referenced from:
+      llvm::compression::zstd::compress(llvm::ArrayRef<unsigned char>, llvm::SmallVectorImpl<unsigned char>&, int) in libtoylang_compiler.a[2499](Compression.cpp.o)
+  "_ZSTD_decompress", referenced from:
+      llvm::compression::zstd::uncompress(llvm::ArrayRef<unsigned char>, unsigned char*, unsigned long&) in libtoylang_compiler.a[2499](Compression.cpp.o)
+  "_ZSTD_getErrorName", referenced from:
+      llvm::compression::zstd::uncompress(llvm::ArrayRef<unsigned char>, unsigned char*, unsigned long&) in libtoylang_compiler.a[2499](Compression.cpp.o)
+  "_ZSTD_isError", referenced from:
+      llvm::compression::zstd::compress(llvm::ArrayRef<unsigned char>, llvm::SmallVectorImpl<unsigned char>&, int) in libtoylang_compiler.a[2499](Compression.cpp.o)
+      llvm::compression::zstd::uncompress(llvm::ArrayRef<unsigned char>, unsigned char*, unsigned long&) in libtoylang_compiler.a[2499](Compression.cpp.o)
+  "std::__1::error_code::message() const", referenced from:
+      (anonymous namespace)::X86InsertPrefetch::doInitialization(llvm::Module&) in libtoylang_compiler.a[210](X86InsertPrefetch.cpp.o)
+      (anonymous namespace)::X86LoadValueInjectionLoadHardeningPass::runOnMachineFunction(llvm::MachineFunction&) in libtoylang_compiler.a[217](X86LoadValueInjectionLoadHardening.cpp.o)
+      llvm::SectionMemoryManager::finalizeMemory(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>*) in libtoylang_compiler.a[1084](SectionMemoryManager.cpp.o)
+      llvm::object::ELFObjectFile<llvm::object::ELFType<(llvm::support::endianness)1, false>>::section_rel_end(llvm::object::DataRefImpl) const in libtoylang_compiler.a[1091](RuntimeDyldELF.cpp.o)
+      llvm::object::ELFObjectFile<llvm::object::ELFType<(llvm::support::endianness)1, false>>::getRelSection(llvm::object::DataRefImpl) const in libtoylang_compiler.a[1091](RuntimeDyldELF.cpp.o)
+      llvm::object::ELFObjectFile<llvm::object::ELFType<(llvm::support::endianness)1, false>>::getRel(llvm::object::DataRefImpl) const in libtoylang_compiler.a[1091](RuntimeDyldELF.cpp.o)
+      llvm::object::ELFObjectFile<llvm::object::ELFType<(llvm::support::endianness)1, false>>::getRela(llvm::object::DataRefImpl) const in libtoylang_compiler.a[1091](RuntimeDyldELF.cpp.o)
+      ...
+  "std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>::find(char, unsigned long) const", referenced from:
+      llvm::DOTGraphTraits<llvm::DOTFuncInfo*>::getCompleteNodeLabel(llvm::BasicBlock const*, llvm::DOTFuncInfo*, llvm::function_ref<void (llvm::raw_string_ostream&, llvm::BasicBlock const&)>, llvm::function_ref<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>&, unsigned int&, unsigned int)>) in libtoylang_compiler.a[1347](PassBuilder.cpp.o)
+      rescheduleLexographically(std::__1::vector<llvm::MachineInstr*, std::__1::allocator<llvm::MachineInstr*>>, llvm::MachineBasicBlock*, std::__1::function<llvm::MachineInstrBundleIterator<llvm::MachineInstr, false> ()>) in libtoylang_compiler.a[1689](MIRCanonicalizerPass.cpp.o)
+      llvm::DOTGraphTraits<DOTFuncMSSAInfo*>::getNodeAttributes(llvm::BasicBlock const*, DOTFuncMSSAInfo*) in libtoylang_compiler.a[2014](MemorySSA.cpp.o)
+      llvm::InstrProfSymtab::create(llvm::Module&, bool) in libtoylang_compiler.a[2057](InstrProf.cpp.o)
+      (anonymous namespace)::BitcodeReader::parseFunctionBody(llvm::Function*) in libtoylang_compiler.a[2366](BitcodeReader.cpp.o)
+      llvm::Module::print(llvm::raw_ostream&, llvm::AssemblyAnnotationWriter*, bool, bool) const in libtoylang_compiler.a[2371](AsmWriter.cpp.o)
+      llvm::SpecialCaseList::Matcher::insert(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, unsigned int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>&) in libtoylang_compiler.a[2567](SpecialCaseList.cpp.o)
+      llvm::SpecialCaseList::Matcher::insert(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>, unsigned int, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>&) in libtoylang_compiler.a[2567](SpecialCaseList.cpp.o)
+      ...
+  "std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>::rfind(char, unsigned long) const", referenced from:
+      llvm::CodeViewDebug::getFullFilepath(llvm::DIFile const*) in libtoylang_compiler.a[1504](CodeViewDebug.cpp.o)
+  "std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>::compare(unsigned long, unsigned long, char const*) const", referenced from:
+      llvm::X86TargetLowering::ExpandInlineAsm(llvm::CallInst*) const in libtoylang_compiler.a[206](X86ISelLowering.cpp.o)
+      llvm::X86TargetLowering::ExpandInlineAsm(llvm::CallInst*) const in libtoylang_compiler.a[206](X86ISelLowering.cpp.o)
+      llvm::ARMTargetLowering::ExpandInlineAsm(llvm::CallInst*) const in libtoylang_compiler.a[759](ARMISelLowering.cpp.o)
+  "std::__1::error_category::equivalent(std::__1::error_code const&, int) const", referenced from:
+      vtable for (anonymous namespace)::RuntimeDyldErrorCategory in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+      vtable for (anonymous namespace)::InstrProfErrorCategoryType in libtoylang_compiler.a[2057](InstrProf.cpp.o)
+      vtable for (anonymous namespace)::SampleProfErrorCategoryType in libtoylang_compiler.a[2063](SampleProf.cpp.o)
+      vtable for (anonymous namespace)::_object_error_category in libtoylang_compiler.a[2209](Error.cpp.o)
+      vtable for (anonymous namespace)::CodeViewErrorCategory in libtoylang_compiler.a[2325](CodeViewError.cpp.o)
+      vtable for (anonymous namespace)::BitcodeErrorCategoryType in libtoylang_compiler.a[2366](BitcodeReader.cpp.o)
+      vtable for (anonymous namespace)::ErrorErrorCategory in libtoylang_compiler.a[2516](Error.cpp.o)
+      ...
+  "std::__1::error_category::equivalent(int, std::__1::error_condition const&) const", referenced from:
+      vtable for (anonymous namespace)::RuntimeDyldErrorCategory in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+      vtable for (anonymous namespace)::InstrProfErrorCategoryType in libtoylang_compiler.a[2057](InstrProf.cpp.o)
+      vtable for (anonymous namespace)::SampleProfErrorCategoryType in libtoylang_compiler.a[2063](SampleProf.cpp.o)
+      vtable for (anonymous namespace)::_object_error_category in libtoylang_compiler.a[2209](Error.cpp.o)
+      vtable for (anonymous namespace)::CodeViewErrorCategory in libtoylang_compiler.a[2325](CodeViewError.cpp.o)
+      vtable for (anonymous namespace)::BitcodeErrorCategoryType in libtoylang_compiler.a[2366](BitcodeReader.cpp.o)
+      vtable for (anonymous namespace)::ErrorErrorCategory in libtoylang_compiler.a[2516](Error.cpp.o)
+      ...
+  "std::__1::error_category::default_error_condition(int) const", referenced from:
+      vtable for (anonymous namespace)::RuntimeDyldErrorCategory in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+      vtable for (anonymous namespace)::InstrProfErrorCategoryType in libtoylang_compiler.a[2057](InstrProf.cpp.o)
+      vtable for (anonymous namespace)::SampleProfErrorCategoryType in libtoylang_compiler.a[2063](SampleProf.cpp.o)
+      vtable for (anonymous namespace)::_object_error_category in libtoylang_compiler.a[2209](Error.cpp.o)
+      vtable for (anonymous namespace)::CodeViewErrorCategory in libtoylang_compiler.a[2325](CodeViewError.cpp.o)
+      vtable for (anonymous namespace)::BitcodeErrorCategoryType in libtoylang_compiler.a[2366](BitcodeReader.cpp.o)
+      vtable for (anonymous namespace)::ErrorErrorCategory in libtoylang_compiler.a[2516](Error.cpp.o)
+      ...
+  "std::__1::basic_stringbuf<char, std::__1::char_traits<char>, std::__1::allocator<char>>::str() const", referenced from:
+      llvm::NVPTXRegisterInfo::getName(unsigned int) const in libtoylang_compiler.a[489](NVPTXAsmPrinter.cpp.o)
+      llvm::NVPTXTargetLowering::getPrototype(llvm::DataLayout const&, llvm::Type*, std::__1::vector<llvm::TargetLoweringBase::ArgListEntry, std::__1::allocator<llvm::TargetLoweringBase::ArgListEntry>> const&, llvm::SmallVectorImpl<llvm::ISD::OutputArg> const&, llvm::MaybeAlign, llvm::CallBase const&, unsigned int) const in libtoylang_compiler.a[494](NVPTXISelLowering.cpp.o)
+      (anonymous namespace)::AVRAsmParser::validateTargetOperandClass(llvm::MCParsedAsmOperand&, unsigned int) in libtoylang_compiler.a[716](AVRAsmParser.cpp.o)
+      getOrCreateFrameHelper(llvm::Module*, llvm::MachineModuleInfo*, llvm::SmallVectorImpl<unsigned int>&, FrameHelperType, unsigned int) in libtoylang_compiler.a[982](AArch64LowerHomogeneousPrologEpilog.cpp.o)
+      (anonymous namespace)::FunctionStackPoisoner::runOnFunction() in libtoylang_compiler.a[1412](AddressSanitizer.cpp.o)
+      llvm::InstrOrderFilePass::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) in libtoylang_compiler.a[1422](InstrOrderFile.cpp.o)
+      getStatString(char const*, int, int, char const*, bool) in libtoylang_compiler.a[1983](ImportedFunctionsInliningStatistics.cpp.o)
+      ...
+  "std::__1::__shared_weak_count::__get_deleter(std::type_info const&) const", referenced from:
+      vtable for std::__1::__shared_ptr_emplace<llvm::internal::NfaTranscriber, std::__1::allocator<llvm::internal::NfaTranscriber>> in libtoylang_compiler.a[642](HexagonInstrInfo.cpp.o)
+      vtable for std::__1::__shared_ptr_emplace<std::__1::map<std::__1::pair<unsigned long long, unsigned long long>, std::__1::pair<unsigned long long, unsigned int>, std::__1::less<std::__1::pair<unsigned long long, unsigned long long>>, std::__1::allocator<std::__1::pair<std::__1::pair<unsigned long long, unsigned long long> const, std::__1::pair<unsigned long long, unsigned int>>>>, std::__1::allocator<std::__1::map<std::__1::pair<unsigned long long, unsigned long long>, std::__1::pair<unsigned long long, unsigned int>, std::__1::less<std::__1::pair<unsigned long long, unsigned long long>>, std::__1::allocator<std::__1::pair<std::__1::pair<unsigned long long, unsigned long long> const, std::__1::pair<unsigned long long, unsigned int>>>>>> in libtoylang_compiler.a[642](HexagonInstrInfo.cpp.o)
+      vtable for std::__1::__shared_ptr_emplace<llvm::PBQP::ValuePool<llvm::PBQP::MDMatrix<llvm::PBQP::RegAlloc::MatrixMetadata>>::PoolEntry, std::__1::allocator<llvm::PBQP::ValuePool<llvm::PBQP::MDMatrix<llvm::PBQP::RegAlloc::MatrixMetadata>>::PoolEntry>> in libtoylang_compiler.a[989](AArch64PBQPRegAlloc.cpp.o)
+      vtable for std::__1::__shared_ptr_emplace<llvm::SectionMemoryManager, std::__1::allocator<llvm::SectionMemoryManager>> in libtoylang_compiler.a[1056](MCJIT.cpp.o)
+      vtable for std::__1::__shared_ptr_emplace<std::__1::promise<llvm::Expected<std::__1::map<llvm::StringRef, llvm::JITEvaluatedSymbol, std::__1::less<llvm::StringRef>, std::__1::allocator<std::__1::pair<llvm::StringRef const, llvm::JITEvaluatedSymbol>>>>>, std::__1::allocator<std::__1::promise<llvm::Expected<std::__1::map<llvm::StringRef, llvm::JITEvaluatedSymbol, std::__1::less<llvm::StringRef>, std::__1::allocator<std::__1::pair<llvm::StringRef const, llvm::JITEvaluatedSymbol>>>>>>> in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+      vtable for std::__1::__shared_ptr_emplace<llvm::SmallVector<llvm::Use*, 16u>, std::__1::allocator<llvm::SmallVector<llvm::Use*, 16u>>> in libtoylang_compiler.a[1399](OpenMPOpt.cpp.o)
+      vtable for std::__1::__shared_ptr_emplace<llvm::PBQP::ValuePool<llvm::PBQP::Vector>::PoolEntry, std::__1::allocator<llvm::PBQP::ValuePool<llvm::PBQP::Vector>::PoolEntry>> in libtoylang_compiler.a[1678](RegAllocPBQP.cpp.o)
+      ...
+  "std::__1::locale::use_facet(std::__1::locale::id&) const", referenced from:
+      std::__1::basic_ostream<char, std::__1::char_traits<char>>& std::__1::__put_character_sequence[abi:v160006]<char, std::__1::char_traits<char>>(std::__1::basic_ostream<char, std::__1::char_traits<char>>&, char const*, unsigned long) in libtoylang_compiler.a[489](NVPTXAsmPrinter.cpp.o)
+      std::__1::basic_ostream<char, std::__1::char_traits<char>>& std::__1::operator<<[abi:v160006]<std::__1::char_traits<char>>(std::__1::basic_ostream<char, std::__1::char_traits<char>>&, std::__1::__iom_t4<char> const&) in libtoylang_compiler.a[1412](AddressSanitizer.cpp.o)
+  "std::__1::ios_base::getloc() const", referenced from:
+      std::__1::basic_ostream<char, std::__1::char_traits<char>>& std::__1::__put_character_sequence[abi:v160006]<char, std::__1::char_traits<char>>(std::__1::basic_ostream<char, std::__1::char_traits<char>>&, char const*, unsigned long) in libtoylang_compiler.a[489](NVPTXAsmPrinter.cpp.o)
+      std::__1::basic_ostream<char, std::__1::char_traits<char>>& std::__1::operator<<[abi:v160006]<std::__1::char_traits<char>>(std::__1::basic_ostream<char, std::__1::char_traits<char>>&, std::__1::__iom_t4<char> const&) in libtoylang_compiler.a[1412](AddressSanitizer.cpp.o)
+  "std::exception::what() const", referenced from:
+      vtable for std::__1::bad_function_call in libtoylang_compiler.a[194](X86ExpandPseudo.cpp.o)
+  "std::logic_error::logic_error(char const*)", referenced from:
+      std::length_error::length_error[abi:v160006](char const*) in libtoylang_compiler.a[157](XCoreAsmPrinter.cpp.o)
+      std::out_of_range::out_of_range[abi:v160006](char const*) in libtoylang_compiler.a[202](X86FloatingPoint.cpp.o)
+  "std::logic_error::logic_error(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)", referenced from:
+      report_size_overflow(unsigned long, unsigned long) in libtoylang_compiler.a[2565](SmallVector.cpp.o)
+      report_at_maximum_capacity(unsigned long) in libtoylang_compiler.a[2565](SmallVector.cpp.o)
+  "std::logic_error::logic_error(std::logic_error const&)", referenced from:
+      std::exception_ptr std::make_exception_ptr[abi:v160006]<std::__1::future_error>(std::__1::future_error) in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+  "std::length_error::~length_error()", referenced from:
+      std::__1::__throw_length_error[abi:v160006](char const*) in libtoylang_compiler.a[157](XCoreAsmPrinter.cpp.o)
+      report_size_overflow(unsigned long, unsigned long) in libtoylang_compiler.a[2565](SmallVector.cpp.o)
+      report_at_maximum_capacity(unsigned long) in libtoylang_compiler.a[2565](SmallVector.cpp.o)
+  "std::out_of_range::~out_of_range()", referenced from:
+      std::__1::__throw_out_of_range[abi:v160006](char const*) in libtoylang_compiler.a[202](X86FloatingPoint.cpp.o)
+  "std::exception_ptr::exception_ptr(std::exception_ptr const&)", referenced from:
+      std::__1::__assoc_state<llvm::Expected<std::__1::map<llvm::StringRef, llvm::JITEvaluatedSymbol, std::__1::less<llvm::StringRef>, std::__1::allocator<std::__1::pair<llvm::StringRef const, llvm::JITEvaluatedSymbol>>>>>::move() in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+  "std::exception_ptr::~exception_ptr()", referenced from:
+      std::__1::__assoc_state<llvm::Expected<std::__1::map<llvm::StringRef, llvm::JITEvaluatedSymbol, std::__1::less<llvm::StringRef>, std::__1::allocator<std::__1::pair<llvm::StringRef const, llvm::JITEvaluatedSymbol>>>>>::~__assoc_state() in libtoylang_compiler.a[1088](RuntimeDyld.cpp.o)
+     ....
+      llvm::sys::Process::FileDescriptorHasColors(int) in libtoylang_compiler.a[2611](Process.cpp.o)
+  "_uncompress", referenced from:
+      llvm::compression::zlib::uncompress(llvm::ArrayRef<unsigned char>, unsigned char*, unsigned long&) in libtoylang_compiler.a[2499](Compression.cpp.o)
+ld: symbol(s) not found for architecture arm64
+clang-15: error: linker command failed with exit code 1 (use -v to see invocation)
+Linking failed with status: exit status: 1

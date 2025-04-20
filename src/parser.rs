@@ -455,7 +455,6 @@ impl<'a> Parser<'a> {
 
     // Parses prefix elements: literals, identifiers, grouped expr, maybe unary later
     fn parse_prefix(&mut self) -> ParseResult<Expression> {
-        println!("Parsing Prefix");
         let current_token_clone = self.current_token.clone();
         let result = match self.current_token.clone() {
             Token::FloatNum(value) => Ok(Expression::FloatLiteral(value)),
@@ -479,9 +478,7 @@ impl<'a> Parser<'a> {
 
     // Parses `( EXPR )` - consumes the initial `(` and final `)`
     fn parse_grouped_expression(&mut self) -> ParseResult<Expression> {
-        println!("Parsing Grouped Expression");
         self.next_token();
-        println!("current_token: {:?}", self.current_token);
         let expr = self.parse_expression(Lowest)?; // Parse inner expr
         self.expect_and_consume(Token::RParen)?; // Expect and consume ')'
         Ok(expr)
