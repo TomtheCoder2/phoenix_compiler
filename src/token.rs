@@ -52,6 +52,7 @@ pub enum Token {
     If, // 'if'
     Else, // 'else'
     While, // 'while' 
+    For, // 'for'
     // Type Keywords (optional, could use identifiers)
     // TypeInt, // 'int'
     // TypeFloat, // 'float'

@@ -99,6 +99,16 @@ fn main() {
             return;
         }
     };
+    
+    // write the llvm ir to file if verbose
+    if args.verbose {
+        let llvm_ir_file_path = input_path.with_extension("ll");
+        match fs::write(&llvm_ir_file_path, module.print_to_string().to_string()) {
+            Ok(_) => println!("LLVM IR written to: {}", llvm_ir_file_path.display()),
+            Err(e) => eprintln!("Error writing LLVM IR to file: {}", e),
+        }
+    }
+    
 
     // Create a temporary object file path
     let temp_obj_path = Path::new("temp_output.o");

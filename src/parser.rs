@@ -187,9 +187,54 @@ impl<'a> Parser<'a> {
             Token::Var => self.parse_let_or_var_statement(true), // Pass mutable flag
             Token::Fun => self.parse_function_definition(),      // Added fun
             Token::If => self.parse_if_statement(),
-            Token::While => self.parse_while_statement(), // Added
+            Token::While => self.parse_while_statement(),
+            Token::For => self.parse_for_statement(),
             _ => self.parse_expression_statement(),
         }
+    }
+
+    // Parses: for ( [INIT_EXPR]? ; [COND_EXPR]? ; [INCR_EXPR]? ) { BODY }
+    // No trailing semicolon expected/consumed.
+    fn parse_for_statement(&mut self) -> ParseResult<Statement> {
+        self.next_token(); // Consume 'for'
+        self.expect_and_consume(Token::LParen)?;
+
+        // 1. Parse Initializer (Optional Expression before first ';')
+        let initializer = if self.current_token == Token::Semicolon {
+            None // No initializer expression
+        } else {
+            // Parse expression, box it
+            Some(Box::new(self.parse_expression(Precedence::Lowest)?))
+        };
+        self.expect_and_consume(Token::Semicolon)?; // Consume first ';'
+
+        // 2. Parse Condition (Optional Expression before second ';')
+        let condition = if self.current_token == Token::Semicolon {
+            None // No condition expression (defaults to true)
+        } else {
+            Some(self.parse_expression(Precedence::Lowest)?)
+        };
+        self.expect_and_consume(Token::Semicolon)?; // Consume second ';'
+
+        // 3. Parse Increment (Optional Expression before ')')
+        let increment = if self.current_token == Token::RParen {
+            None // No increment expression
+        } else {
+            // Parse expression, box it
+            Some(Box::new(self.parse_expression(Precedence::Lowest)?))
+        };
+        self.expect_and_consume(Token::RParen)?; // Consume ')'
+
+        // 4. Parse Body
+        self.expect_and_consume(Token::LBrace)?;
+        let body = self.parse_block_statements()?; // Consumes '}'
+
+        Ok(Statement::ForStmt {
+            initializer,
+            condition,
+            increment,
+            body: Box::new(body),
+        })
     }
 
     // Parses: while ( CONDITION ) { BODY }
@@ -1273,5 +1318,53 @@ mod tests {
             _ => panic!("Expected WhileStmt"),
         }
         assert_eq!(parser.current_token, Token::Eof);
+    }
+
+    #[test]
+    fn test_parse_for_statement_full() {
+        let input = "for (i = 0; i < 10; i = i + 1) { print(i); }";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ForStmt {
+                initializer,
+                condition,
+                increment,
+                body,
+            } => {
+                assert!(initializer.is_some());
+                assert!(condition.is_some());
+                assert!(increment.is_some());
+                // ... add detailed checks for init (assign), cond (<), incr (assign) ...
+                assert_eq!(body.statements.len(), 1); // print(i);
+            }
+            _ => panic!("Expected ForStmt"),
+        }
+        assert_eq!(parser.current_token, Token::Eof);
+    }
+
+    #[test]
+    fn test_parse_for_statement_empty_parts() {
+        let input = "for (;;) { print(1); }"; // Infinite loop
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ForStmt {
+                initializer,
+                condition,
+                increment,
+                body,
+            } => {
+                assert!(initializer.is_none());
+                assert!(condition.is_none());
+                assert!(increment.is_none());
+                assert_eq!(body.statements.len(), 1);
+            }
+            _ => panic!("Expected ForStmt"),
+        }
     }
 }

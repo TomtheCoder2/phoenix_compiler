@@ -656,7 +656,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // Merge Block and PHI Node
                 self.builder.position_at_end(merge_bb);
-                if then_val.get_type() != else_val.get_type() { 
+                if then_val.get_type() != else_val.get_type() {
                     return Err(CodeGenError::InvalidType(format!(
                         "If branches must have the same type: then {:?}, else {:?}",
                         then_val.get_type(),
@@ -858,6 +858,103 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 Ok(None)
             } // End WhileStmt
 
+            // --- For Statement ---
+            Statement::ForStmt {
+                initializer,
+                condition,
+                increment,
+                body,
+            } => {
+                let current_func = self
+                    .current_function
+                    .expect("Cannot compile 'for' outside a function");
+
+                // --- Scoping ---
+                // Does the initializer introduce variables visible only in the loop?
+                // Our current initializer is just an expr, so no new scope needed *yet*.
+                // If we allowed `for (var i=0;...)`, we'd need enter_scope/exit_scope here.
+                // let original_vars = self.variables.clone();
+                // self.symbol_table.enter_scope(); // If initializer creates scope
+
+                // 1. Compile Initializer (if present)
+                if let Some(init_expr) = initializer {
+                    // Compile for side effects, ignore value
+                    let _ = self.compile_expression(init_expr)?;
+                }
+
+                // 2. Create Basic Blocks
+                let cond_bb = self.context.append_basic_block(current_func, "for_cond");
+                let loop_bb = self.context.append_basic_block(current_func, "for_body");
+                // Create increment block *before* after block for clearer flow graph
+                let incr_bb = self.context.append_basic_block(current_func, "for_incr");
+                let after_bb = self.context.append_basic_block(current_func, "after_for");
+
+                // 3. Branch from current block to condition check
+                self.builder.build_unconditional_branch(cond_bb);
+
+                // 4. Compile Condition Check Block
+                self.builder.position_at_end(cond_bb);
+                let bool_cond = match condition {
+                    Some(cond_expr) => {
+                        // Compile condition expression, check if bool (i1)
+                        let cond_val = self.compile_expression(cond_expr)?;
+                        match cond_val {
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
+                                iv
+                            }
+                            _ => return Err(CodeGenError::InvalidType(
+                                format!(
+                                    "For loop condition must be boolean (i1), found {:?}",
+                                    cond_val.get_type()
+                                )
+                            )),
+                        }
+                    }
+                    None => {
+                        // No condition means loop indefinitely (or until break/return later)
+                        // Generate `true` constant
+                        self.context.bool_type().const_int(1, false)
+                    }
+                };
+                // Branch conditionally based on condition
+                self.builder
+                    .build_conditional_branch(bool_cond, loop_bb, after_bb);
+
+                // 5. Compile Loop Body Block
+                self.builder.position_at_end(loop_bb);
+                let _ = self.compile_block(body)?; // Compile body statements
+                                                   // After body, branch to increment block (if not already terminated)
+                // if loop_bb.get_terminator().is_none() {
+                //     self.builder.build_unconditional_branch(incr_bb);
+                // }
+                if self.builder.get_insert_block().is_some_and(|bb| bb.get_terminator().is_none()) {
+                    // <<< This check applies to where the builder is NOW
+                    // <<< If body ended with IfStmt, builder is at ifcont_stmt
+                    self.builder.build_unconditional_branch(incr_bb); // <<< Terminates that block
+                }
+
+                // 6. Compile Increment Block
+                self.builder.position_at_end(incr_bb);
+                if let Some(incr_expr) = increment {
+                    // Compile increment expression for side effects, ignore value
+                    let _ = self.compile_expression(incr_expr)?;
+                }
+                // After increment, unconditionally branch back to condition check
+                // (only if block wasn't terminated by increment itself, unlikely but possible)
+                if incr_bb.get_terminator().is_none() {
+                    self.builder.build_unconditional_branch(cond_bb);
+                }
+
+                // 7. Position builder at the block after the loop
+                self.builder.position_at_end(after_bb);
+
+                // --- Restore Scope (if needed) ---
+                // self.symbol_table.exit_scope();
+                // self.variables = original_vars;
+
+                Ok(None) // For statement yields no value
+            } // End ForStmt
+
             // --- If Statement (optional else, no return value/PHI needed) ---
             Statement::IfStmt {
                 condition,
@@ -914,7 +1011,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 return_type_ann,
                 body,
             } => {
-                if self.functions.contains_key(name) { // Function already defined
+                if self.functions.contains_key(name) {
+                    // Function already defined
                     return Err(CodeGenError::FunctionRedefinition(name.clone()));
                 }
 
@@ -980,7 +1078,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // --- Compile Function Body ---
                 let mut last_body_val: Option<BasicValueEnum<'ctx>> = None;
                 let mut body_compile_err: Option<CodeGenError> = None;
-                for body_stmt in &body.statements { 
+                for body_stmt in &body.statements {
                     match self.compile_statement(body_stmt) {
                         Ok(Some(val)) => last_body_val = Some(val),
                         Ok(None) => {} // Ignore None values (e.g., let bindings)
@@ -989,7 +1087,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             break; // Stop on first error
                         }
                     }
-                }   
+                }
 
                 // --- Build Return (check type) ---
                 if body_compile_err.is_none() {
@@ -1038,7 +1136,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     ));
                 }
                 self.fpm.run_on(&function);
-                if !function.verify(true) { 
+                if !function.verify(true) {
                     return Err(CodeGenError::LlvmError(
                         "Function verification failed after optimization".to_string(),
                     ));
@@ -1247,13 +1345,12 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    
+
     fn compile_float_literal_expression() {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
         let mut compiler = Compiler::new(&context, &builder, &module);
-
 
         let expr = Expression::FloatLiteral(5.43);
         let result = compiler.compile_expression(&expr);
@@ -1335,46 +1432,44 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), CodeGenError::LlvmError(_)));
     }
-    
+
     #[test]
     fn compile_function_definition() {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
         let mut compiler = Compiler::new(&context, &builder, &module);
-    
+
         // Create a simple function: function add(a: Int, b: Int) -> Int { a + b }
         let params = vec![
             ("a".to_string(), Some(Type::Int)),
             ("b".to_string(), Some(Type::Int)),
         ];
-        
+
         let body = Program {
-            statements: vec![
-                Statement::ExpressionStmt(Expression::BinaryOp {
-                    op: BinaryOperator::Add,
-                    left: Box::new(Expression::Variable("a".to_string())),
-                    right: Box::new(Expression::Variable("b".to_string())),
-                }),
-            ],
+            statements: vec![Statement::ExpressionStmt(Expression::BinaryOp {
+                op: BinaryOperator::Add,
+                left: Box::new(Expression::Variable("a".to_string())),
+                right: Box::new(Expression::Variable("b".to_string())),
+            })],
         };
-    
+
         let func_def = Statement::FunctionDef {
             name: "add".to_string(),
             params,
             return_type_ann: Some(Type::Int),
             body: Box::new(body),
         };
-    
+
         // Compile the function definition
         let result = compiler.compile_statement(&func_def);
-        
+
         // Verify compilation succeeded
         assert!(result.is_ok());
-        
+
         // Check that the function was added to the compiler's function map
         assert!(compiler.functions.contains_key("add"));
-        
+
         // Verify the function signature is correct
         let (param_types, return_type, _) = compiler.functions.get("add").unwrap();
         assert_eq!(param_types.len(), 2);

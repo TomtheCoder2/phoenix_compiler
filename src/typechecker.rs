@@ -1,8 +1,6 @@
 // src/typechecker.rs
 
-use crate::ast::{
-    ComparisonOperator, Expression, Program, Statement, UnaryOperator,
-};
+use crate::ast::{ComparisonOperator, Expression, Program, Statement, UnaryOperator};
 use crate::symbol_table::{FunctionSignature, SymbolInfo, SymbolTable};
 use crate::types::Type;
 use std::fmt;
@@ -163,12 +161,47 @@ impl TypeChecker {
             Statement::WhileStmt { condition, body } => {
                 // Check condition is bool
                 let cond_type = self.check_expression(condition)?;
-                if cond_type != Type::Bool { 
+                if cond_type != Type::Bool {
                     return Err(TypeError::TypeMismatch {
                         expected: Type::Bool,
                         found: cond_type,
                         context: "while condition".to_string(),
                     });
+                }
+                // Check body. Append errors if any.
+                if let Err(mut body_errors) = self.check_program(body) {
+                    self.errors.append(&mut body_errors);
+                }
+                Ok(())
+            }
+            Statement::ForStmt {
+                initializer,
+                condition,
+                increment,
+                body,
+            } => {
+                // Check initializer (if any)
+                if let Some(init) = initializer {
+                    if let Err(mut init_errors) = self.check_expression(init) {
+                        self.errors.push(init_errors);
+                    }
+                }
+                // Check condition (if any)
+                if let Some(cond) = condition {
+                    let cond_type = self.check_expression(cond)?;
+                    if cond_type != Type::Bool {
+                        return Err(TypeError::TypeMismatch {
+                            expected: Type::Bool,
+                            found: cond_type,
+                            context: "for loop condition".to_string(),
+                        });
+                    }
+                }
+                // Check increment (if any)
+                if let Some(inc) = increment {
+                    if let Err(mut inc_errors) = self.check_expression(inc) {
+                        self.errors.push(inc_errors);
+                    }
                 }
                 // Check body. Append errors if any.
                 if let Err(mut body_errors) = self.check_program(body) {
@@ -284,7 +317,8 @@ impl TypeChecker {
                 let target_info = self
                     .symbol_table
                     .lookup_variable(target)
-                    .ok_or_else(|| TypeError::UndefinedVariable(target.clone()))?.clone();
+                    .ok_or_else(|| TypeError::UndefinedVariable(target.clone()))?
+                    .clone();
                 // Check mutability
                 if !target_info.is_mutable {
                     return Err(TypeError::AssignmentToImmutable(target.clone()));
@@ -320,12 +354,10 @@ impl TypeChecker {
                 let right_type = self.check_expression(right)?;
                 // Allow comparing int/int or float/float or bool/bool (for ==, !=)
                 if left_type != right_type || left_type == Type::Void {
-                    return Err(
-                        TypeError::InvalidOperation {
-                            op: format!("{:?}", op), // Improve op formatting later
-                            type_info: format!("{} and {}", left_type, right_type),
-                        },
-                    );
+                    return Err(TypeError::InvalidOperation {
+                        op: format!("{:?}", op), // Improve op formatting later
+                        type_info: format!("{} and {}", left_type, right_type),
+                    });
                 }
                 if left_type == Type::Bool
                     && !matches!(
@@ -336,7 +368,7 @@ impl TypeChecker {
                         }
                     )
                 {
-                    return Err(TypeError::InvalidOperation { 
+                    return Err(TypeError::InvalidOperation {
                         op: format!("{:?}", op),
                         type_info: "bool and bool".to_string(),
                     });
@@ -372,7 +404,7 @@ impl TypeChecker {
             Expression::FunctionCall { name, args } => {
                 // --- Built-in Print ---
                 if name == "print" {
-                    if args.len() != 1 { 
+                    if args.len() != 1 {
                         return Err(TypeError::IncorrectArgCount {
                             func_name: name.clone(),
                             expected: 1,
@@ -390,10 +422,11 @@ impl TypeChecker {
                     let signature = self
                         .symbol_table
                         .lookup_function(name)
-                        .ok_or_else(|| TypeError::UndefinedFunction(name.clone()))?.clone();
+                        .ok_or_else(|| TypeError::UndefinedFunction(name.clone()))?
+                        .clone();
                     // Check arg count
                     if args.len() != signature.param_types.len() {
-                        return Err(TypeError::IncorrectArgCount { 
+                        return Err(TypeError::IncorrectArgCount {
                             func_name: name.clone(),
                             expected: signature.param_types.len(),
                             found: args.len(),
@@ -422,7 +455,7 @@ impl TypeChecker {
             } => {
                 // Check condition is bool
                 let cond_type = self.check_expression(condition)?;
-                if cond_type != Type::Bool { 
+                if cond_type != Type::Bool {
                     return Err(TypeError::TypeMismatch {
                         expected: Type::Bool,
                         found: cond_type,

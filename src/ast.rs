@@ -42,6 +42,19 @@ pub enum Statement {
         condition: Expression, // Condition must evaluate to bool
         body: Box<Program>,    // Block of statements to repeat
     },
+    // Added: for (init; cond; incr) { body }
+    ForStmt {
+        // Initializer: Can be variable declaration or just expression(s)
+        // Let's allow only Expression for simplicity now (e.g. `i=0`, not `var i = 0`)
+        // Use Option<Expression> - maybe Boxed? Let's box it.
+        initializer: Option<Box<Expression>>,
+        // Condition: Evaluated before each iteration
+        condition: Option<Expression>, // No Box needed if direct Expression
+        // Increment: Evaluated after each iteration
+        increment: Option<Box<Expression>>,
+        // Body: Executed each iteration
+        body: Box<Program>,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]

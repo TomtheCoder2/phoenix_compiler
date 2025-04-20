@@ -77,7 +77,7 @@ impl<'a> Lexer<'a> {
                     Token::NotEqual // '!='
                 } else {
                     Token::Bang // Handle '!' later if needed for logical NOT
-                    // Token::Illegal('!') // For now, '!' alone is illegal
+                                // Token::Illegal('!') // For now, '!' alone is illegal
                 }
             }
             Some('<') => {
@@ -110,6 +110,7 @@ impl<'a> Lexer<'a> {
                     "if" => Token::If,
                     "else" => Token::Else,
                     "while" => Token::While,
+                    "for" => Token::For,
                     // Check type names? Optional.
                     // type_name if keyword_to_type(type_name).is_some() => {
                     //     Token::Type(keyword_to_type(type_name).unwrap()) // Or specific TypeInt etc.
@@ -448,9 +449,15 @@ mod tests {
         let input = "!true != false";
         let mut l = Lexer::new(input);
         let tokens = vec![
-            Token::Bang, Token::BoolLiteral(true), Token::NotEqual, Token::BoolLiteral(false), Token::Eof,
+            Token::Bang,
+            Token::BoolLiteral(true),
+            Token::NotEqual,
+            Token::BoolLiteral(false),
+            Token::Eof,
         ];
-        for expected in tokens { assert_eq!(l.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(l.next_token(), expected);
+        }
     }
 
     #[test]
@@ -458,10 +465,59 @@ mod tests {
         let input = "while (i < 10) { i = i + 1; }";
         let mut l = Lexer::new(input);
         let tokens = vec![
-            Token::While, Token::LParen, Token::Identifier("i".into()), Token::LessThan, Token::IntNum(10), Token::RParen,
-            Token::LBrace, Token::Identifier("i".into()), Token::Assign, Token::Identifier("i".into()), Token::Plus, Token::IntNum(1), Token::Semicolon, Token::RBrace,
+            Token::While,
+            Token::LParen,
+            Token::Identifier("i".into()),
+            Token::LessThan,
+            Token::IntNum(10),
+            Token::RParen,
+            Token::LBrace,
+            Token::Identifier("i".into()),
+            Token::Assign,
+            Token::Identifier("i".into()),
+            Token::Plus,
+            Token::IntNum(1),
+            Token::Semicolon,
+            Token::RBrace,
             Token::Eof,
         ];
-        for expected in tokens { assert_eq!(l.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(l.next_token(), expected);
+        }
+    }
+
+    #[test]
+    fn test_for_keyword() {
+        let input = "for (i = 0; i < 10; i = i + 1) { print(i); }";
+        let mut l = Lexer::new(input);
+        let tokens = vec![
+            Token::For,
+            Token::LParen,
+            Token::Identifier("i".into()),
+            Token::Assign,
+            Token::IntNum(0),
+            Token::Semicolon,
+            Token::Identifier("i".into()),
+            Token::LessThan,
+            Token::IntNum(10),
+            Token::Semicolon,
+            Token::Identifier("i".into()),
+            Token::Assign,
+            Token::Identifier("i".into()),
+            Token::Plus,
+            Token::IntNum(1),
+            Token::RParen,
+            Token::LBrace,
+            Token::Identifier("print".into()),
+            Token::LParen,
+            Token::Identifier("i".into()),
+            Token::RParen,
+            Token::Semicolon,
+            Token::RBrace,
+            Token::Eof,
+        ];
+        for expected in tokens {
+            assert_eq!(l.next_token(), expected);
+        }
     }
 }
