@@ -4,8 +4,8 @@ use std::fs;
 use std::path::Path;
 use toylang_compiler::codegen::Compiler;
 use toylang_compiler::lexer::Lexer;
-use toylang_compiler::utils::link_object_file;
 use toylang_compiler::parser::Parser as ToyParser;
+use toylang_compiler::utils::link_object_file;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "ToyLang Compiler")]
@@ -15,7 +15,7 @@ struct Args {
     input: String,
 
     /// Output executable file path
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "output")]
     output: String,
 
     /// Enable verbose output
@@ -105,5 +105,8 @@ fn main() {
         }
     }
 
-    println!("Compilation successful! Executable saved to: {}", args.output);
+    println!(
+        "Compilation successful! Executable saved to: {}",
+        args.output
+    );
 }
