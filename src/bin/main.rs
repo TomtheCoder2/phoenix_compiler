@@ -1,15 +1,10 @@
-
 use inkwell::context::Context;
-// To call linker (e.g., clang)
-use std::io::{self, Write};
 use std::path::Path;
-// For output file path
-use std::process::Command;
 use toylang_compiler::codegen::Compiler;
 use toylang_compiler::lexer::Lexer;
-use toylang_compiler::utils::link_object_file;
 use toylang_compiler::parser::Parser;
 use toylang_compiler::typechecker::TypeChecker;
+use toylang_compiler::utils::link_object_file;
 // Add import
 
 // Remove JIT type alias if not used
@@ -77,16 +72,21 @@ fn main() {
         }
     };
 
-    // --- >>> Type Checking <<< ---
+    println!("\n--- Type Checking ---");
     let mut type_checker = TypeChecker::new();
-    if let Err(errors) = type_checker.check_program(&program) {
-        eprintln!("\nType Checking Errors:");
-        for e in errors {
-            eprintln!("- {}", e);
+    match type_checker.check_program(&program) {
+        // Call the checker
+        Ok(()) => {
+            println!("Type Checking Successful.");
         }
-        return; // Stop compilation on type errors
+        Err(errors) => {
+            eprintln!("Type Checking Errors:");
+            for e in errors {
+                eprintln!("- {}", e);
+            }
+            std::process::exit(1); // Exit if errors found
+        }
     }
-    println!("\nType Checking Successful.");
 
     // --- Emit Object File ---
     let obj_path = Path::new(output_filename);
@@ -103,5 +103,3 @@ fn main() {
     // --- Linking (Optional - using external linker like clang) ---
     link_object_file(obj_path, "output_executable"); // Specify desired executable name
 } // Context, Module, Builder dropped here
-
-

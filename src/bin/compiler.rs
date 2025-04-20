@@ -60,7 +60,7 @@ fn main() {
             return;
         }
     };
-    
+
     // write the ast to file if verbose
     if args.verbose {
         let ast_file_path = input_path.with_extension("ast");
@@ -70,16 +70,21 @@ fn main() {
         }
     }
 
-    // --- >>> Type Checking <<< ---
+    println!("\n--- Type Checking ---");
     let mut type_checker = TypeChecker::new();
-    if let Err(errors) = type_checker.check_program(&program) {
-        eprintln!("\nType Checking Errors:");
-        for e in errors {
-            eprintln!("- {}", e);
+    match type_checker.check_program(&program) {
+        // Call the checker
+        Ok(()) => {
+            println!("Type Checking Successful.");
         }
-        return; // Stop compilation on type errors
+        Err(errors) => {
+            eprintln!("Type Checking Errors:");
+            for e in errors {
+                eprintln!("- {}", e);
+            }
+            std::process::exit(1); // Exit if errors found
+        }
     }
-    println!("\nType Checking Successful.");
 
     // Generate LLVM IR
     let context = Context::create();
@@ -99,7 +104,7 @@ fn main() {
             return;
         }
     };
-    
+
     // write the llvm ir to file if verbose
     if args.verbose {
         let llvm_ir_file_path = input_path.with_extension("ll");
@@ -108,7 +113,6 @@ fn main() {
             Err(e) => eprintln!("Error writing LLVM IR to file: {}", e),
         }
     }
-    
 
     // Create a temporary object file path
     let temp_obj_path = Path::new("temp_output.o");
