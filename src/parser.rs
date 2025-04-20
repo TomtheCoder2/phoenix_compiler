@@ -579,6 +579,11 @@ impl<'a> Parser<'a> {
                 self.next_token();
                 Ok(Expression::Variable(name))
             }
+            Token::StringLiteral(ref s) => {
+                let value = s.clone(); // Clone the string
+                self.next_token();
+                Ok(Expression::StringLiteral(value))
+            }
             Token::LParen => {
                 // self.next_token(); // Consume '(' - NO, parse_grouped does it now
                 self.parse_grouped_expression()

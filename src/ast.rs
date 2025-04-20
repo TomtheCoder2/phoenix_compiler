@@ -67,8 +67,9 @@ pub enum UnaryOperator {
 pub enum Expression {
     // Literals
     FloatLiteral(f64), // Renamed
-    IntLiteral(i64),   // Added
-    BoolLiteral(bool), // Added
+    IntLiteral(i64),
+    BoolLiteral(bool),
+    StringLiteral(String), 
 
     // Variable & Call
     Variable(String),

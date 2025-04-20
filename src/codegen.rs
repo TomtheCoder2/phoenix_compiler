@@ -43,6 +43,7 @@ pub enum CodeGenError {
     InvalidBinaryOperation(String), // For type mismatches
     MissingTypeInfo(String), // If type info is needed but missing
     AssignmentToImmutable(String),
+    PrintStrArgError(String),
 }
 impl fmt::Display for CodeGenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -83,6 +84,9 @@ impl fmt::Display for CodeGenError {
                     msg
                 )
             }
+            CodeGenError::PrintStrArgError(msg) => {
+                write!(f, "Codegen Error: print_str argument error: {}", msg)
+            }
         }
     }
 }
@@ -117,6 +121,7 @@ pub struct Compiler<'a, 'ctx> {
     print_float_wrapper_func: Option<FunctionValue<'ctx>>,
     print_int_wrapper_func: Option<FunctionValue<'ctx>>,
     print_bool_wrapper_func: Option<FunctionValue<'ctx>>,
+    print_str_wrapper_func: Option<FunctionValue<'ctx>>, // Added cache
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -162,6 +167,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             print_float_wrapper_func: None,
             print_int_wrapper_func: None,
             print_bool_wrapper_func: None,
+            print_str_wrapper_func: None, // Added cache
         }
     }
 
@@ -204,7 +210,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         let c_string = CString::new(value).expect("CString::new failed");
         // Use `to_bytes()` (length *without* null) and let LLVM add the null terminator (`false`)
         // This ensures the type has the correct size (e.g., [4 x i8] for "%f\n")
-        let string_val = self.context.const_string(c_string.to_bytes(), false);
+        let string_val = self.context.const_string(c_string.to_bytes_with_nul(), true);
 
         let global = self.module.add_global(
             string_val.get_type(), // Type from const_string should be correct now
@@ -273,6 +279,37 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     }
                     None => Err(CodeGenError::UndefinedVariable(name.clone())),
                 }
+            }
+
+            Expression::StringLiteral(value) => {
+                // 1. Create a global constant for the string literal's value
+                //    Use a unique name based on value? Or let LLVM handle duplicates?
+                //    Let's use a simple name for now. Need a better naming scheme later.
+                let global_name = format!("g_str_{}", self.module.get_globals().count()); // Simple unique name
+                let global_val = self.create_global_string(&global_name, value, Linkage::Private);
+
+                // 2. Get the i8* pointer to the global string constant
+                let zero_idx = self.context.i32_type().const_int(0, false);
+                let string_type = global_val.get_value_type().into_array_type();
+                let ptr_val = match unsafe {
+                    self.builder.build_in_bounds_gep(
+                        string_type,
+                        global_val.as_pointer_value(),
+                        &[zero_idx, zero_idx],
+                        "str_ptr",
+                    )
+                } {
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(format!(
+                            "LLVM error during string pointer generation: {}",
+                            e
+                        )))
+                    }
+                };
+
+                // 3. A StringLiteral expression evaluates to the i8* pointer
+                Ok(ptr_val.into()) // Return PointerValue wrapped in BasicValueEnum
             }
 
             // Arithmetic Operations (Example: requires operands to be the same type for now)
@@ -494,11 +531,37 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             let wrapper = self.get_or_declare_print_float_wrapper()?; // Rename old one
                             self.builder.build_call(wrapper, &[fv.into()], "");
                         }
+                        BasicValueEnum::PointerValue(_) => {
+                            return Err(CodeGenError::PrintArgError(
+                                "Cannot print raw pointers directly".to_string(),
+                            ))
+                        }
                         _ => {
                             return Err(CodeGenError::PrintArgError("Unsupported type".to_string()))
                         }
                     }
                     // Print returns 0.0 float for now
+                    Ok(self.context.f64_type().const_float(0.0).into())
+                }
+                else if name == "print_str" {
+                    if args.len() != 1 {
+                        return Err(CodeGenError::PrintStrArgError("Expected 1 argument".to_string()));
+                    }
+                    // Compile the argument, expect it to yield a pointer (i8*)
+                    let arg_value = self.compile_expression(&args[0])?;
+                    let str_ptr = match arg_value {
+                        BasicValueEnum::PointerValue(pv) if pv.get_type() == self.context.i8_type().ptr_type(AddressSpace::default()) => pv,
+                        _ => return Err(CodeGenError::PrintStrArgError(format!(
+                            "Argument must be a string literal (evaluating to i8*), found {:?}", arg_value.get_type()
+                        ))),
+                    };
+
+                    // Get the wrapper function
+                    let wrapper = self.get_or_declare_print_str_wrapper()?;
+                    // Call the wrapper with the i8*
+                    self.builder.build_call(wrapper, &[str_ptr.into()], "");
+
+                    // print_str returns Void -> represent as 0.0 float for now
                     Ok(self.context.f64_type().const_float(0.0).into())
                 }
                 // --- User Function Call ---
@@ -774,6 +837,23 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         Ok(func)
     }
 
+    fn get_or_declare_print_str_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
+        if let Some(f) = self.print_str_wrapper_func {
+            return Ok(f);
+        } // Check cache
+
+        // Signature: void print_str_wrapper(i8*)
+        let i8_ptr_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let void_type = self.context.void_type();
+        let fn_type = void_type.fn_type(&[i8_ptr_type.into()], false);
+
+        let func = self
+            .module
+            .add_function("print_str_wrapper", fn_type, Some(Linkage::External));
+        self.print_str_wrapper_func = Some(func); // Store in cache
+        Ok(func)
+    }
+
     /// Compiles a single Statement node.
     /// Returns Ok(Some(FloatValue)) if it's an ExpressionStmt, Ok(None) for LetBinding, Err on failure.
     /// Compiles a single Statement node. Now runs FPM on function definitions.
@@ -902,12 +982,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
                                 iv
                             }
-                            _ => return Err(CodeGenError::InvalidType(
-                                format!(
+                            _ => {
+                                return Err(CodeGenError::InvalidType(format!(
                                     "For loop condition must be boolean (i1), found {:?}",
                                     cond_val.get_type()
-                                )
-                            )),
+                                )))
+                            }
                         }
                     }
                     None => {
@@ -924,10 +1004,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 self.builder.position_at_end(loop_bb);
                 let _ = self.compile_block(body)?; // Compile body statements
                                                    // After body, branch to increment block (if not already terminated)
-                // if loop_bb.get_terminator().is_none() {
-                //     self.builder.build_unconditional_branch(incr_bb);
-                // }
-                if self.builder.get_insert_block().is_some_and(|bb| bb.get_terminator().is_none()) {
+                                                   // if loop_bb.get_terminator().is_none() {
+                                                   //     self.builder.build_unconditional_branch(incr_bb);
+                                                   // }
+                if self
+                    .builder
+                    .get_insert_block()
+                    .is_some_and(|bb| bb.get_terminator().is_none())
+                {
                     // <<< This check applies to where the builder is NOW
                     // <<< If body ended with IfStmt, builder is at ifcont_stmt
                     self.builder.build_unconditional_branch(incr_bb); // <<< Terminates that block
@@ -1034,6 +1118,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     Type::Int => self.context.i64_type().fn_type(&llvm_param_types, false),
                     Type::Bool => self.context.bool_type().fn_type(&llvm_param_types, false),
                     Type::Void => self.context.void_type().fn_type(&llvm_param_types, false),
+                    Type::String => {
+                        // String is represented as a pointer (i8*)
+                        self.context
+                            .i8_type()
+                            .ptr_type(AddressSpace::default())
+                            .fn_type(&llvm_param_types, false)
+                    }
                     // Add other types like Pointer, Array, Struct later if needed
                 };
 
@@ -1201,6 +1292,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     pub fn compile_program_to_module(&mut self, program: &Program) -> Result<(), CodeGenError> {
         // --- Reset state for this compilation unit ---
         self.functions.clear(); // Clear user function definitions (printf is handled separately)
+        self.print_float_wrapper_func = None;
+        self.print_int_wrapper_func = None;
+        self.print_bool_wrapper_func = None;
+        self.print_str_wrapper_func = None; // Reset string wrapper cache too
 
         // --- Declare Printf Early ---
         // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)

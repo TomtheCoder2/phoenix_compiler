@@ -96,6 +96,10 @@ impl<'a> Lexer<'a> {
                     Token::GreaterThan // '>'
                 }
             }
+            Some('"') => {
+                // Start of a string literal
+                return self.read_string(); // Delegate and return directly
+            }
 
             // Identifiers / Keywords / Bool Literals
             Some(ch) if is_identifier_start(ch) => {
@@ -213,6 +217,51 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    // Reads characters between double quotes, handling basic escapes
+    fn read_string(&mut self) -> Token {
+        let mut result = String::new();
+        self.advance(); // Consume the opening '"'
+
+        while let Some(ch) = self.current_char {
+            match ch {
+                '"' => {
+                    // End of string
+                    self.advance(); // Consume the closing '"'
+                    return Token::StringLiteral(result);
+                }
+                '\\' => {
+                    // Escape sequence
+                    self.advance(); // Consume '\'
+                    match self.current_char {
+                        Some('n') => result.push('\n'),
+                        Some('t') => result.push('\t'),
+                        Some('"') => result.push('"'),
+                        Some('\\') => result.push('\\'),
+                        // Add other escapes if needed (e.g., \r, \0)
+                        Some(other) => {
+                            // Unknown escape sequence, maybe treat as literal backslash and char?
+                            // Or report error? Let's push both for now.
+                            result.push('\\');
+                            result.push(other);
+                        }
+                        None => {
+                            // EOF after backslash
+                            return Token::Illegal('\\'); // Or better error token
+                        }
+                    }
+                }
+                _ => {
+                    // Regular character
+                    result.push(ch);
+                }
+            }
+            self.advance(); // Move to next character inside string
+        }
+
+        // If we reach here, EOF was hit before closing quote
+        Token::Illegal('"') // Indicate unterminated string error
     }
 }
 
@@ -519,5 +568,26 @@ mod tests {
         for expected in tokens {
             assert_eq!(l.next_token(), expected);
         }
+    }
+
+    #[test]
+    fn test_string_literal() {
+        let input = r#" "Hello" "World\n123\"\\" "#;
+        let mut l = Lexer::new(input);
+        let tokens = vec![
+            Token::StringLiteral("Hello".to_string()),
+            Token::StringLiteral("World\n123\"\\".to_string()),
+            Token::Eof,
+        ];
+        for expected in tokens {
+            assert_eq!(l.next_token(), expected);
+        }
+    }
+
+    #[test]
+    fn test_unterminated_string() {
+        let input = r#" "abc "#;
+        let mut l = Lexer::new(input);
+        assert_eq!(l.next_token(), Token::Illegal('"'));
     }
 }

@@ -13,6 +13,7 @@ pub enum Token {
     FloatNum(f64),     // Renamed from Number
     IntNum(i64),       // Added for integers
     BoolLiteral(bool), // Added for true/false
+    StringLiteral(String), // Added for string literals
 
     // Operators
     Plus,  // '+'

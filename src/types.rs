@@ -14,6 +14,7 @@ pub enum Type {
     Bool,  // Represents i1 (boolean)
     Void,  // Represents lack of a value (for functions that don't return) - maybe add later
            // Add Function, Array, Struct types later
+    String,
 }
 
 impl Type {
@@ -25,6 +26,7 @@ impl Type {
             Type::Int => context.i64_type().into(), // Using 64-bit integers
             Type::Bool => context.bool_type().into(), // i1
             Type::Void => panic!("Cannot get LLVM BasicTypeEnum for Type::Void"),
+            Type::String => panic!("Cannot get LLVM BasicTypeEnum for Type::String"),
         }
     }
 
@@ -35,6 +37,7 @@ impl Type {
             Type::Int => context.i64_type().into(),
             Type::Bool => context.bool_type().into(),
             Type::Void => context.void_type().into(),
+            Type::String => todo!()
         }
     }
 
@@ -64,6 +67,7 @@ impl fmt::Display for Type {
             Type::Int => write!(f, "int"),
             Type::Bool => write!(f, "bool"),
             Type::Void => write!(f, "void"),
+            Type::String => write!(f, "string"),
         }
     }
 }

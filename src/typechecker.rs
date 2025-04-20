@@ -401,9 +401,12 @@ impl TypeChecker {
                     }
                 }
             }
+            Expression::StringLiteral(string) => {
+                Ok(Type::String)
+            }
             Expression::FunctionCall { name, args } => {
                 // --- Built-in Print ---
-                if name == "print" {
+                if name == "print" || name == "print_str"{
                     if args.len() != 1 {
                         return Err(TypeError::IncorrectArgCount {
                             func_name: name.clone(),
