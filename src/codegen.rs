@@ -1683,11 +1683,16 @@ mod tests {
         ];
 
         let body = Program {
-            statements: vec![Statement::ExpressionStmt(Expression::BinaryOp {
-                op: BinaryOperator::Add,
-                left: Box::new(Expression::Variable("a".to_string())),
-                right: Box::new(Expression::Variable("b".to_string())),
-            })],
+            statements: vec![
+                Statement::ExpressionStmt(Expression::BinaryOp {
+                    op: BinaryOperator::Add,
+                    left: Box::new(Expression::Variable("a".to_string())),
+                    right: Box::new(Expression::Variable("b".to_string())),
+                }),
+                Statement::ReturnStmt {
+                    value: Some(*Box::new(Expression::Variable("a".to_string()))),
+                },
+            ],
         };
 
         let func_def = Statement::FunctionDef {
@@ -1712,5 +1717,155 @@ mod tests {
         assert_eq!(param_types[0], Type::Int);
         assert_eq!(param_types[1], Type::Int);
         assert_eq!(*return_type, Type::Int);
+    }
+
+    #[test]
+    fn compile_function_with_explicit_int_return() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+        // Create a function: fun returns_int(): int { return 10; }
+        let body = Program {
+            statements: vec![Statement::ReturnStmt {
+                value: Some(*Box::new(Expression::IntLiteral(10))),
+            }],
+        };
+
+        let func_def = Statement::FunctionDef {
+            name: "returns_int".to_string(),
+            params: vec![],
+            return_type_ann: Some(Type::Int),
+            body: Box::new(body),
+        };
+
+        // Compile the function definition
+        let result = compiler.compile_statement(&func_def);
+        assert!(result.is_ok());
+
+        // Verify the function signature has the correct return type
+        let (_, return_type, _) = compiler.functions.get("returns_int").unwrap();
+        assert_eq!(*return_type, Type::Int);
+    }
+
+    #[test]
+    fn compile_function_with_explicit_float_return() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+        // Create a function: fun returns_float(): float { return 3.14; }
+        let body = Program {
+            statements: vec![Statement::ReturnStmt {
+                value: Some(*Box::new(Expression::FloatLiteral(3.20))),
+            }],
+        };
+
+        let func_def = Statement::FunctionDef {
+            name: "returns_float".to_string(),
+            params: vec![],
+            return_type_ann: Some(Type::Float),
+            body: Box::new(body),
+        };
+
+        // Compile the function definition
+        let result = compiler.compile_statement(&func_def);
+        assert!(result.is_ok());
+
+        // Verify the function signature has the correct return type
+        let (_, return_type, _) = compiler.functions.get("returns_float").unwrap();
+        assert_eq!(*return_type, Type::Float);
+    }
+
+    #[test]
+    fn compile_function_with_explicit_bool_return() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+        // Create a function: fun returns_bool(): bool { return true; }
+        let body = Program {
+            statements: vec![Statement::ReturnStmt {
+                value: Some(*Box::new(Expression::BoolLiteral(true))),
+            }],
+        };
+
+        let func_def = Statement::FunctionDef {
+            name: "returns_bool".to_string(),
+            params: vec![],
+            return_type_ann: Some(Type::Bool),
+            body: Box::new(body),
+        };
+
+        // Compile the function definition
+        let result = compiler.compile_statement(&func_def);
+        assert!(result.is_ok());
+
+        // Verify the function signature has the correct return type
+        let (_, return_type, _) = compiler.functions.get("returns_bool").unwrap();
+        assert_eq!(*return_type, Type::Bool);
+    }
+
+    #[test]
+    fn compile_function_with_explicit_void_return() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+        // Create a function: fun returns_void(): void { return; }
+        let body = Program {
+            statements: vec![Statement::ReturnStmt { value: None }],
+        };
+
+        let func_def = Statement::FunctionDef {
+            name: "returns_void".to_string(),
+            params: vec![],
+            return_type_ann: Some(Type::Void),
+            body: Box::new(body),
+        };
+
+        // Compile the function definition
+        let result = compiler.compile_statement(&func_def);
+        assert!(result.is_ok());
+
+        // Verify the function signature has the correct return type
+        let (_, return_type, _) = compiler.functions.get("returns_void").unwrap();
+        assert_eq!(*return_type, Type::Void);
+    }
+
+    #[test]
+    fn compile_function_with_implicit_void_return() {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let mut compiler = Compiler::new(&context, &builder, &module);
+
+        // Create a function: fun implicit_void(): void { print_str("Implicit void"); }
+        let body = Program {
+            statements: vec![Statement::ExpressionStmt(Expression::FunctionCall {
+                name: "print_str".to_string(),
+                args: vec![*Box::new(Expression::StringLiteral(
+                    "Implicit void".to_string(),
+                ))],
+            })],
+        };
+
+        let func_def = Statement::FunctionDef {
+            name: "implicit_void".to_string(),
+            params: vec![],
+            return_type_ann: Some(Type::Void),
+            body: Box::new(body),
+        };
+
+        // Compile the function definition
+        let result = compiler.compile_statement(&func_def);
+        assert!(result.is_ok());
+
+        // Verify the function signature has the correct return type
+        let (_, return_type, _) = compiler.functions.get("implicit_void").unwrap();
+        assert_eq!(*return_type, Type::Void);
     }
 }
