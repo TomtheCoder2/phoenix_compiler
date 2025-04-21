@@ -90,12 +90,10 @@ impl fmt::Display for CodeGenError {
         }
     }
 }
-type CompileResult<'ctx, T> = Result<T, CodeGenError>; // Generic result
-
 // Result now often returns BasicValueEnum as expressions can yield int, float, or bool
 type CompileExprResult<'ctx> = Result<BasicValueEnum<'ctx>, CodeGenError>;
 // CompileStmtResult remains similar, might yield BasicValueEnum if expr stmt returns non-float
-type CompileStmtResult<'ctx> = Result<Option<BasicValueEnum<'ctx>>, CodeGenError>;
+type CompileStmtResult<'ctx> = Result<(Option<BasicValueEnum<'ctx>>, bool), CodeGenError>;
 
 // Helper struct to store variable info (pointer + type)
 #[derive(Debug, Clone, Copy)] // Copy is efficient as PointerValue/Type are Copy
@@ -122,6 +120,7 @@ pub struct Compiler<'a, 'ctx> {
     print_int_wrapper_func: Option<FunctionValue<'ctx>>,
     print_bool_wrapper_func: Option<FunctionValue<'ctx>>,
     print_str_wrapper_func: Option<FunctionValue<'ctx>>, // Added cache
+    print_str_ln_wrapper_func: Option<FunctionValue<'ctx>>,
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -168,6 +167,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             print_int_wrapper_func: None,
             print_bool_wrapper_func: None,
             print_str_wrapper_func: None, // Added cache
+            print_str_ln_wrapper_func: None,
         }
     }
 
@@ -210,7 +210,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         let c_string = CString::new(value).expect("CString::new failed");
         // Use `to_bytes()` (length *without* null) and let LLVM add the null terminator (`false`)
         // This ensures the type has the correct size (e.g., [4 x i8] for "%f\n")
-        let string_val = self.context.const_string(c_string.to_bytes_with_nul(), true);
+        let string_val = self
+            .context
+            .const_string(c_string.to_bytes_with_nul(), false);
 
         let global = self.module.add_global(
             string_val.get_type(), // Type from const_string should be correct now
@@ -504,64 +506,93 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             // --- Handle Function Calls ---
             Expression::FunctionCall { name, args } => {
                 // --- >> SPECIAL CASE: Built-in print function << ---
-                if name == "print" {
+                if name == "print"
+                    || name == "print_int"
+                    || name == "print_str"
+                    || name == "println"
+                {
                     if args.len() != 1 {
                         return Err(CodeGenError::IncorrectArgumentCount {
-                            func_name: "print".to_string(),
+                            func_name: name.to_string(),
                             expected: 1,
                             found: args.len(),
                         });
                     }
-                    let arg_value = self.compile_expression(&args[0])?; // Result is BasicValueEnum
 
-                    // --- CHOOSE WRAPPER/FORMAT based on type ---
+                    let arg_value = self.compile_expression(&args[0])?;
+
+                    // Determine if we need a newline
+                    let add_newline = name == "println";
+
+                    // For print_int and print_str, validate the argument type
+                    if name == "print_int" {
+                        match arg_value {
+                            BasicValueEnum::IntValue(_) => {}
+                            _ => {
+                                return Err(CodeGenError::PrintArgError(format!(
+                                    "print_int expects an integer argument, found {:?}",
+                                    arg_value.get_type()
+                                )))
+                            }
+                        }
+                    } else if name == "print_str" {
+                        match arg_value {
+                            BasicValueEnum::PointerValue(pv)
+                                if pv.get_type()
+                                    == self.context.i8_type().ptr_type(AddressSpace::default()) => {
+                            }
+                            _ => return Err(CodeGenError::PrintStrArgError(format!(
+                                "Argument must be a string literal (evaluating to i8*), found {:?}",
+                                arg_value.get_type()
+                            ))),
+                        }
+                    }
+
+                    // Choose appropriate wrapper based on argument type
                     match arg_value {
                         BasicValueEnum::IntValue(iv) => {
                             if iv.get_type().get_bit_width() == 1 {
                                 // Boolean
-                                let wrapper = self.get_or_declare_print_bool_wrapper()?; // Need new wrapper
+                                let wrapper = self.get_or_declare_print_bool_wrapper()?;
                                 self.builder.build_call(wrapper, &[iv.into()], "");
                             } else {
                                 // Integer (i64)
-                                let wrapper = self.get_or_declare_print_int_wrapper()?; // Need new wrapper
+                                let wrapper = self.get_or_declare_print_int_wrapper()?;
                                 self.builder.build_call(wrapper, &[iv.into()], "");
                             }
                         }
                         BasicValueEnum::FloatValue(fv) => {
-                            let wrapper = self.get_or_declare_print_float_wrapper()?; // Rename old one
+                            let wrapper = self.get_or_declare_print_float_wrapper()?;
                             self.builder.build_call(wrapper, &[fv.into()], "");
                         }
-                        BasicValueEnum::PointerValue(_) => {
-                            return Err(CodeGenError::PrintArgError(
-                                "Cannot print raw pointers directly".to_string(),
-                            ))
+                        BasicValueEnum::PointerValue(pv) => {
+                            // Check if it's a string pointer (i8*)
+                            if pv.get_type()
+                                == self.context.i8_type().ptr_type(AddressSpace::default())
+                            {
+                                let wrapper = self.get_or_declare_print_str_wrapper()?;
+                                self.builder.build_call(wrapper, &[pv.into()], "");
+                            } else {
+                                return Err(CodeGenError::PrintArgError(
+                                    "Cannot print raw pointers directly".to_string(),
+                                ));
+                            }
                         }
                         _ => {
-                            return Err(CodeGenError::PrintArgError("Unsupported type".to_string()))
+                            return Err(CodeGenError::PrintArgError(
+                                "Unsupported type for print".to_string(),
+                            ));
                         }
                     }
-                    // Print returns 0.0 float for now
-                    Ok(self.context.f64_type().const_float(0.0).into())
-                }
-                else if name == "print_str" {
-                    if args.len() != 1 {
-                        return Err(CodeGenError::PrintStrArgError("Expected 1 argument".to_string()));
+
+                    // If println, add a newline
+                    if add_newline {
+                        // Get or declare the print_str_ln wrapper instead of creating a new global string each time
+                        let print_str_ln_wrapper = self.get_or_declare_print_str_ln_wrapper()?;
+                        self.builder.build_call(print_str_ln_wrapper, &[], "");
                     }
-                    // Compile the argument, expect it to yield a pointer (i8*)
-                    let arg_value = self.compile_expression(&args[0])?;
-                    let str_ptr = match arg_value {
-                        BasicValueEnum::PointerValue(pv) if pv.get_type() == self.context.i8_type().ptr_type(AddressSpace::default()) => pv,
-                        _ => return Err(CodeGenError::PrintStrArgError(format!(
-                            "Argument must be a string literal (evaluating to i8*), found {:?}", arg_value.get_type()
-                        ))),
-                    };
 
-                    // Get the wrapper function
-                    let wrapper = self.get_or_declare_print_str_wrapper()?;
-                    // Call the wrapper with the i8*
-                    self.builder.build_call(wrapper, &[str_ptr.into()], "");
-
-                    // print_str returns Void -> represent as 0.0 float for now
+                    // Print functions return 0.0 float for now
                     Ok(self.context.f64_type().const_float(0.0).into())
                 }
                 // --- User Function Call ---
@@ -777,19 +808,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
     // Helper to compile a block (Program) and return the value of its last ExpressionStmt
     // Returns Ok(None) if block is empty or has no final ExpressionStmt
-    fn compile_block(&mut self, block_program: &Program) -> CompileStmtResult<'ctx> {
-        let mut last_val: Option<BasicValueEnum<'ctx>> = None;
-        // --- Scoping ---
-        // Need proper lexical scoping here. For now, variables leak out/in.
-        // let original_vars = self.variables.clone();
-        for stmt in &block_program.statements {
-            let stmt_val = self.compile_statement(stmt)?;
-            if stmt_val.is_some() {
-                last_val = stmt_val;
+    // Helper to compile blocks (Program), returns bool indicating if block terminated itself
+    fn compile_program_block(&mut self, program: &Program) -> Result<bool, CodeGenError> {
+        // Changed return type
+        let mut terminated = false;
+        for stmt in &program.statements {
+            let (stmt_val_opt, stmt_terminated) = self.compile_statement(stmt)?;
+            // We ignore stmt_val_opt here as this block isn't an expression block
+            if stmt_terminated {
+                terminated = true;
+                break; // Stop processing statements after a terminator
             }
         }
-        // self.variables = original_vars;
-        Ok(last_val)
+        Ok(terminated)
     }
 
     fn get_or_declare_print_float_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
@@ -854,6 +885,67 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         Ok(func)
     }
 
+    // Helper to get or declare the print_str_ln wrapper function
+    fn get_or_declare_print_str_ln_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
+        // Return cached function if available
+        if let Some(func) = self.print_str_ln_wrapper_func {
+            return Ok(func);
+        }
+
+        // Get the print_str wrapper first
+        let str_wrapper = self.get_or_declare_print_str_wrapper()?;
+
+        // Create print_str_ln wrapper with no parameters (just prints a newline)
+        let fn_type = self.context.void_type().fn_type(&[], false);
+        let function = self
+            .module
+            .add_function("print_str_ln_wrapper", fn_type, None);
+        let entry_bb = self.context.append_basic_block(function, "entry");
+
+        // Save current position
+        let current_block = self.builder.get_insert_block();
+
+        // Position at the wrapper function's entry block
+        self.builder.position_at_end(entry_bb);
+
+        // Create global string once (inside the wrapper function)
+        let global_val = self.create_global_string("g_newline_constant", "\n", Linkage::Private);
+
+        // Get pointer to the global string
+        let zero_idx = self.context.i32_type().const_int(0, false);
+        let string_type = global_val.get_value_type().into_array_type();
+        let ptr_val = unsafe {
+            self.builder.build_in_bounds_gep(
+                string_type,
+                global_val.as_pointer_value(),
+                &[zero_idx, zero_idx],
+                "newline_ptr",
+            )
+        }
+        .map_err(|e| {
+            CodeGenError::LlvmError(format!(
+                "LLVM error during newline pointer generation: {}",
+                e
+            ))
+        })?;
+
+        // Call print_str with the newline
+        self.builder.build_call(str_wrapper, &[ptr_val.into()], "");
+
+        // Return from wrapper
+        self.builder.build_return(None);
+
+        // Restore original position
+        if let Some(block) = current_block {
+            self.builder.position_at_end(block);
+        }
+
+        // Cache the function
+        self.print_str_ln_wrapper_func = Some(function);
+
+        Ok(function)
+    }
+
     /// Compiles a single Statement node.
     /// Returns Ok(Some(FloatValue)) if it's an ExpressionStmt, Ok(None) for LetBinding, Err on failure.
     /// Compiles a single Statement node. Now runs FPM on function definitions.
@@ -870,6 +962,34 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 self.compile_var_let_stmt(name, type_ann, compiled_value, false)
             }
 
+            // --- Return Statement ---
+            Statement::ReturnStmt { value } => {
+                match value {
+                    // Case 1: return <expr>;
+                    Some(expr) => {
+                        // Compile the return value expression
+                        let compiled_value = self.compile_expression(expr)?;
+                        // Generate `ret <type> <value>`
+                        self.builder.build_return(Some(&compiled_value));
+                    }
+                    // Case 2: return; (for void functions)
+                    None => {
+                        // Generate `ret void`
+                        self.builder.build_return(None);
+                    }
+                }
+                // Return statement yields no value *to the next statement*
+                // and terminates the block. The Option<BasicValue> return here
+                // signifies the value of the *last expression checked within this statement*,
+                // which is None if we just returned.
+                // However, compile_block / function compilation handles the actual return value.
+                // Let's return None to signify no value passed to subsequent stmts in sequence.
+                Ok((None, true))
+
+                // Alternative: Could return a special marker? But None seems okay.
+                // The block terminator check in loops/if should handle this.
+            } // End ReturnStmt
+
             Statement::VarBinding {
                 name,
                 type_ann,
@@ -885,7 +1005,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             Statement::ExpressionStmt(expr) => {
                 // Compile the expression, result might be any basic type
                 let value = self.compile_expression(expr)?;
-                Ok(Some(value))
+                Ok((Some(value), false))
             }
 
             // --- While Statement ---
@@ -924,9 +1044,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // 4. Compile Loop Body Block
                 self.builder.position_at_end(loop_bb);
-                let _ = self.compile_block(body)?; // Compile the body statements, ignore value
-                                                   // After body, unconditionally branch back to condition check
-                if loop_bb.get_terminator().is_none() {
+                let body_terminated = self.compile_program_block(body)?; // Compile the body statements, ignore value
+                                                                         // After body, unconditionally branch back to condition check
+                if !body_terminated {
                     // Only branch if block wasn't terminated (e.g. by future return/break)
                     self.builder.build_unconditional_branch(cond_bb);
                 }
@@ -935,7 +1055,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 self.builder.position_at_end(after_bb);
 
                 // While statement yields no value
-                Ok(None)
+                Ok((None, false))
             } // End WhileStmt
 
             // --- For Statement ---
@@ -1002,18 +1122,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // 5. Compile Loop Body Block
                 self.builder.position_at_end(loop_bb);
-                let _ = self.compile_block(body)?; // Compile body statements
-                                                   // After body, branch to increment block (if not already terminated)
-                                                   // if loop_bb.get_terminator().is_none() {
-                                                   //     self.builder.build_unconditional_branch(incr_bb);
-                                                   // }
-                if self
-                    .builder
-                    .get_insert_block()
-                    .is_some_and(|bb| bb.get_terminator().is_none())
-                {
-                    // <<< This check applies to where the builder is NOW
-                    // <<< If body ended with IfStmt, builder is at ifcont_stmt
+                let body_terminated = self.compile_program_block(body)?; // Compile body statements
+                                                                         // After body, branch to increment block (if not already terminated)
+                                                                         // if loop_bb.get_terminator().is_none() {
+                                                                         //     self.builder.build_unconditional_branch(incr_bb);
+                                                                         // }
+                if !body_terminated {
+                    // goes back to increment block, only if not terminated
                     self.builder.build_unconditional_branch(incr_bb); // <<< Terminates that block
                 }
 
@@ -1036,7 +1151,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // self.symbol_table.exit_scope();
                 // self.variables = original_vars;
 
-                Ok(None) // For statement yields no value
+                Ok((None, false)) // For statement yields no value
             } // End ForStmt
 
             // --- If Statement (optional else, no return value/PHI needed) ---
@@ -1071,22 +1186,22 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // Compile THEN branch (Program block)
                 self.builder.position_at_end(then_bb);
-                let _ = self.compile_block(then_branch)?; // Compile the Program block
-                if then_bb.get_terminator().is_none() {
+                let body_terminated = self.compile_program_block(then_branch)?; // Compile the Program block
+                if !body_terminated {
                     self.builder.build_unconditional_branch(merge_bb);
                 }
 
                 // Compile ELSE branch (Program block)
                 if let Some(else_prog) = else_branch {
                     self.builder.position_at_end(else_bb);
-                    let _ = self.compile_block(else_prog)?; // Compile the Program block
-                    if else_bb.get_terminator().is_none() {
+                    let body_terminated = self.compile_program_block(else_prog)?; // Compile the Program block
+                    if !body_terminated {
                         self.builder.build_unconditional_branch(merge_bb);
                     }
                 }
 
                 self.builder.position_at_end(merge_bb);
-                Ok(None)
+                Ok((None, false))
             }
 
             Statement::FunctionDef {
@@ -1107,7 +1222,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     .iter()
                     .map(|(_, opt_ty)| opt_ty.unwrap_or(Type::Float)) // Default Float (improve later)
                     .collect();
-                let toy_return_type = return_type_ann.unwrap_or(Type::Float); // Default Float (improve later)
+                let toy_return_type = return_type_ann.unwrap_or(Type::Void); // Default Float (improve later)
 
                 let llvm_param_types: Vec<BasicMetadataTypeEnum> = toy_param_types
                     .iter()
@@ -1124,8 +1239,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             .i8_type()
                             .ptr_type(AddressSpace::default())
                             .fn_type(&llvm_param_types, false)
-                    }
-                    // Add other types like Pointer, Array, Struct later if needed
+                    } // Add other types like Pointer, Array, Struct later if needed
                 };
 
                 let function = self.module.add_function(name, fn_type, None);
@@ -1166,43 +1280,54 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     );
                 }
 
-                // --- Compile Function Body ---
-                let mut last_body_val: Option<BasicValueEnum<'ctx>> = None;
-                let mut body_compile_err: Option<CodeGenError> = None;
-                for body_stmt in &body.statements {
-                    match self.compile_statement(body_stmt) {
-                        Ok(Some(val)) => last_body_val = Some(val),
-                        Ok(None) => {} // Ignore None values (e.g., let bindings)
-                        Err(e) => {
-                            body_compile_err = Some(e);
-                            break; // Stop on first error
-                        }
-                    }
+                let signature = self.functions.get(name).cloned().unwrap(); // Assume defined
+
+                // Compile the body statements, check if body guaranteed termination
+                let mut body_terminated = false;
+                let mut body_compile_error = None;
+                match self.compile_program_block(body) {
+                    // Use helper, returns Result<bool>
+                    Ok(terminated) => body_terminated = terminated,
+                    Err(e) => body_compile_error = Some(e), // Capture error
                 }
 
-                // --- Build Return (check type) ---
-                if body_compile_err.is_none() {
-                    match toy_return_type {
+                // Handle compilation errors first
+                if let Some(err) = body_compile_error {
+                    // Handle function compilation error
+                    return Err(err);
+                }
+
+                // Check if Block Explicitly Returned implicitly via its structure
+                let needs_implicit_return = !body_terminated
+                    && self
+                        .builder
+                        .get_insert_block()
+                        .map_or(true, |bb| bb.get_terminator().is_none());
+
+                if needs_implicit_return {
+                    // Function ended without explicit return. Add implicit return.
+                    match signature.1 {
+                        // signature.1 is return type
                         Type::Void => {
                             self.builder.build_return(None);
-                        } // Return void
-                        _ => {
-                            // Expect Int, Float, Bool
-                            if let Some(ret_val) = last_body_val {
-                                // TODO: Check if ret_val type matches toy_return_type
-                                // TODO: Add explicit conversions if needed/allowed
-                                self.builder.build_return(Some(&ret_val));
-                            } else {
-                                // Implicit return - return default value for the type? Error?
-                                let default_val: BasicValueEnum<'ctx> = match toy_return_type {
-                                    Type::Int => self.context.i64_type().const_int(0, false).into(),
-                                    Type::Bool => {
-                                        self.context.bool_type().const_int(0, false).into()
-                                    }
-                                    _ => self.context.f64_type().const_float(0.0).into(), // Default float
-                                };
-                                self.builder.build_return(Some(&default_val));
-                            }
+                        }
+                        ty => {
+                            eprintln!("Warning: Function '{}' missing return statement, implicitly returning default value for {}", name, ty);
+                            let default_val: BasicValueEnum<'ctx> = match ty {
+                                Type::Float => self.context.f64_type().const_float(0.0).into(),
+                                Type::Int => self.context.i64_type().const_int(0, false).into(),
+                                Type::Bool => self.context.bool_type().const_int(0, false).into(),
+                                Type::String => {
+                                    // String default is null pointer (i8*)
+                                    self.context
+                                        .i8_type()
+                                        .ptr_type(AddressSpace::default())
+                                        .const_null()
+                                        .into()
+                                }
+                                _ => unreachable!(), // Handle other types later
+                            };
+                            self.builder.build_return(Some(&default_val));
                         }
                     }
                 }
@@ -1217,9 +1342,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // --- Handle errors / Verification / Optimization ---
                 // ... (similar logic, run FPM, check verification) ...
-                if body_compile_err.is_some() || !function.verify(true) {
+                if body_compile_error.is_some() || !function.verify(true) {
                     // Handle function verification failure
-                    if let Some(err) = body_compile_err {
+                    if let Some(err) = body_compile_error {
                         return Err(err);
                     }
                     return Err(CodeGenError::LlvmError(
@@ -1233,7 +1358,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     ));
                 }
 
-                Ok(None)
+                Ok((None, false))
             } // End FunctionDef
         } // End match stmt
     }
@@ -1283,7 +1408,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 is_mutable,
             },
         );
-        Ok(None) // Let statement yields no value itself
+        Ok((None, false)) // Let statement yields no value itself
     }
     // End compile_statement
 
@@ -1296,6 +1421,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         self.print_int_wrapper_func = None;
         self.print_bool_wrapper_func = None;
         self.print_str_wrapper_func = None; // Reset string wrapper cache too
+        self.print_str_ln_wrapper_func = None;
 
         // --- Declare Printf Early ---
         // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)

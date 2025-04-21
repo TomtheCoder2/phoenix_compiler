@@ -115,6 +115,7 @@ impl<'a> Lexer<'a> {
                     "else" => Token::Else,
                     "while" => Token::While,
                     "for" => Token::For,
+                    "return" => Token::Return,
                     // Check type names? Optional.
                     // type_name if keyword_to_type(type_name).is_some() => {
                     //     Token::Type(keyword_to_type(type_name).unwrap()) // Or specific TypeInt etc.
@@ -589,5 +590,24 @@ mod tests {
         let input = r#" "abc "#;
         let mut l = Lexer::new(input);
         assert_eq!(l.next_token(), Token::Illegal('"'));
+    }
+
+    #[test]
+    fn test_return_keyword() {
+        let input = "return 10;";
+        let mut l = Lexer::new(input);
+        let tokens = vec![
+            Token::Return, Token::IntNum(10), Token::Semicolon, Token::Eof,
+        ];
+        for expected in tokens { assert_eq!(l.next_token(), expected); }
+    }
+    #[test]
+    fn test_return_void() { // If we allow `return;`
+        let input = "return;";
+        let mut l = Lexer::new(input);
+        let tokens = vec![
+            Token::Return, Token::Semicolon, Token::Eof,
+        ];
+        for expected in tokens { assert_eq!(l.next_token(), expected); }
     }
 }

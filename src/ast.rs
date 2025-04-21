@@ -55,6 +55,10 @@ pub enum Statement {
         // Body: Executed each iteration
         body: Box<Program>,
     },
+    ReturnStmt {
+        // Value is optional to allow `return;` in void functions
+        value: Option<Expression>,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]

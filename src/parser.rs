@@ -189,6 +189,7 @@ impl<'a> Parser<'a> {
             Token::If => self.parse_if_statement(),
             Token::While => self.parse_while_statement(),
             Token::For => self.parse_for_statement(),
+            Token::Return => self.parse_return_statement(), // Added
             _ => self.parse_expression_statement(),
         }
     }
@@ -235,6 +236,25 @@ impl<'a> Parser<'a> {
             increment,
             body: Box::new(body),
         })
+    }
+
+    // Parses: return [EXPRESSION]? ;
+    fn parse_return_statement(&mut self) -> ParseResult<Statement> {
+        self.next_token(); // Consume 'return'
+
+        let value: Option<Expression>;
+        // Check if the next token is a semicolon (for `return;`)
+        if self.current_token == Token::Semicolon {
+            value = None; // No expression provided
+        } else {
+            // Expect an expression
+            value = Some(self.parse_expression(Precedence::Lowest)?);
+        }
+
+        // Expect the terminating semicolon
+        self.expect_and_consume(Token::Semicolon)?;
+
+        Ok(Statement::ReturnStmt { value })
     }
 
     // Parses: while ( CONDITION ) { BODY }
@@ -1370,6 +1390,36 @@ mod tests {
                 assert_eq!(body.statements.len(), 1);
             }
             _ => panic!("Expected ForStmt"),
+        }
+    }
+
+    #[test]
+    fn test_parse_return_statement_with_value() {
+        let input = "return x + 1;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap(); // Assume parsing single statement
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ReturnStmt { value } => {
+                assert!(value.is_some());
+                // Check value is BinaryOp{ Add, Variable("x"), IntLit(1) }
+            }
+            _ => panic!("Expected ReturnStmt"),
+        }
+    }
+    #[test]
+    fn test_parse_return_statement_no_value() {
+        let input = "return;";
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::ReturnStmt { value } => {
+                assert!(value.is_none());
+            }
+            _ => panic!("Expected ReturnStmt"),
         }
     }
 }

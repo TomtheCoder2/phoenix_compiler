@@ -16,7 +16,7 @@ struct Args {
     input: String,
 
     /// Output executable file path
-    #[arg(short, long, default_value = "output")]
+    #[arg(short, long, default_value = "output/output")]
     output: String,
 
     /// Enable verbose output
@@ -30,6 +30,18 @@ fn main() {
 
     // Read input file
     let input_path = Path::new(&args.input);
+    let output_path = Path::new(&args.output);
+    // check if the output directory exists
+    if let Some(parent) = output_path.parent() {
+        if !parent.exists() {
+            eprintln!("Output directory does not exist: {}", parent.display());
+            // create it
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Error creating output directory: {}", e);
+                return;
+            }
+        }
+    }
     let input = match fs::read_to_string(input_path) {
         Ok(content) => content,
         Err(e) => {
@@ -63,7 +75,7 @@ fn main() {
 
     // write the ast to file if verbose
     if args.verbose {
-        let ast_file_path = input_path.with_extension("ast");
+        let ast_file_path = output_path.with_extension("ast");
         match fs::write(&ast_file_path, format!("{:#?}", program)) {
             Ok(_) => println!("AST written to: {}", ast_file_path.display()),
             Err(e) => eprintln!("Error writing AST to file: {}", e),
@@ -107,7 +119,7 @@ fn main() {
 
     // write the llvm ir to file if verbose
     if args.verbose {
-        let llvm_ir_file_path = input_path.with_extension("ll");
+        let llvm_ir_file_path = output_path.with_extension("ll");
         match fs::write(&llvm_ir_file_path, module.print_to_string().to_string()) {
             Ok(_) => println!("LLVM IR written to: {}", llvm_ir_file_path.display()),
             Err(e) => eprintln!("Error writing LLVM IR to file: {}", e),

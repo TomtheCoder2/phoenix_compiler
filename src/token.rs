@@ -54,6 +54,7 @@ pub enum Token {
     Else, // 'else'
     While, // 'while' 
     For, // 'for'
+    Return, // 'return'
     // Type Keywords (optional, could use identifiers)
     // TypeInt, // 'int'
     // TypeFloat, // 'float'
@@ -69,6 +70,7 @@ pub fn keyword_to_type(ident: &str) -> Option<Type> {
         "int" => Some(Type::Int),
         "float" => Some(Type::Float),
         "bool" => Some(Type::Bool),
+        "void" => Some(Type::Void),
         _ => None,
     }
 }

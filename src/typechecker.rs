@@ -41,6 +41,12 @@ pub enum TypeError {
     VoidAssignment(String),          // Assigning void to variable
     PrintArgError(String),           // Error for built-in print type
     UnknownTypeName(String),         // Type name in annotation not recognized
+    ReturnTypeMismatch {
+        expected: Type,
+        found: Type,
+    }, // Specific error for return
+    ReturnVoidFromNonVoid(Type),     // return; from function expecting value
+    ReturnValueFromVoid,             // return value; from void function
 }
 
 impl fmt::Display for TypeError {
@@ -100,6 +106,17 @@ impl fmt::Display for TypeError {
             }
             TypeError::PrintArgError(msg) => write!(f, "Built-in print error: {}", msg),
             TypeError::UnknownTypeName(name) => write!(f, "Unknown type name '{}'", name),
+            TypeError::ReturnTypeMismatch { expected, found } => write!(
+                f,
+                "Return type mismatch: function expects {}, found {}",
+                expected, found
+            ),
+            TypeError::ReturnVoidFromNonVoid(expected) => write!(
+                f,
+                "Cannot return without value from function expecting {}",
+                expected
+            ),
+            TypeError::ReturnValueFromVoid => write!(f, "Cannot return a value from void function"),
         }
     }
 }
@@ -291,6 +308,47 @@ impl TypeChecker {
                 self.current_function_return_type = original_return_type;
                 self.symbol_table.exit_scope();
             }
+            Statement::ReturnStmt { value } => {
+                // Check context: Must be inside a function
+                let Some(expected_ret_type) = self.current_function_return_type else {
+                    self.errors.push(TypeError::InvalidOperation {
+                        op: "return".to_string(),
+                        type_info: "Cannot return from top-level code".to_string(),
+                    });
+                    return; // Stop checking this statement
+                };
+
+                match (value, expected_ret_type) {
+                    // Case 1: return;
+                    (None, Type::Void) => { /* OK: Returning void from void function */ }
+                    (None, non_void_type) => {
+                        // Error: return; from function expecting a value
+                        self.errors
+                            .push(TypeError::ReturnVoidFromNonVoid(non_void_type));
+                    }
+                    // Case 2: return <expr>;
+                    (Some(expr), Type::Void) => {
+                        // Error: Returning a value from void function
+                        // Still check the expression itself for errors though
+                        let _ = self.check_expression(expr);
+                        self.errors.push(TypeError::ReturnValueFromVoid);
+                    }
+                    (Some(expr), expected_type) => {
+                        // Check the expression and its type
+                        if let Some(found_type) = self.check_expression(expr) {
+                            // Check if found type matches expected return type
+                            if found_type != expected_type {
+                                self.errors.push(TypeError::ReturnTypeMismatch {
+                                    expected: expected_type,
+                                    found: found_type,
+                                });
+                            }
+                            // If types match, it's OK.
+                        }
+                        // If check_expression returned None, error already recorded
+                    }
+                }
+            } // End ReturnStmt
         }
     }
 
@@ -467,6 +525,7 @@ impl TypeChecker {
                     || name == "print_str"
                     || name == "print_int"
                     || name == "print_bool"
+                    || name == "println"
                 {
                     if args.len() != 1 {
                         /* Error: incorrect arg count */
