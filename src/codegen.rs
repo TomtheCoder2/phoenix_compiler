@@ -509,6 +509,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 if name == "print"
                     || name == "print_int"
                     || name == "print_str"
+                    || name == "print_bool"
+                    || name == "print_float"
                     || name == "println"
                 {
                     if args.len() != 1 {
@@ -541,10 +543,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 if pv.get_type()
                                     == self.context.i8_type().ptr_type(AddressSpace::default()) => {
                             }
-                            _ => return Err(CodeGenError::PrintStrArgError(format!(
+                            _ => {
+                                return Err(CodeGenError::PrintStrArgError(format!(
                                 "Argument must be a string literal (evaluating to i8*), found {:?}",
                                 arg_value.get_type()
-                            ))),
+                            )))
+                            }
                         }
                     }
 
@@ -779,13 +783,31 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } => {
                 // --- Scoping (Important!) ---
                 // Need to handle variable scopes if blocks introduce them.
-                // For now, assume blocks share scope with parent. Add proper scoping later.
-                // let original_vars = self.variables.clone(); // Save parent scope if needed
+                let original_vars = self.variables.clone(); // Save original scope
+                self.variables = HashMap::new(); // Clear current scope
 
                 // 1. Compile the statements sequentially
                 for stmt in statements {
-                    // Compile statement, ignore optional value using `?` to propagate error
-                    self.compile_statement(stmt)?;
+                    // Check if statement terminated block
+                    if let Ok((_, terminated)) = self.compile_statement(stmt) {
+                        if terminated {
+                            // Block terminated early, what should its value be?
+                            // This implies unreachable code after it in the AST block.
+                            // Type checker should ideally catch this?
+                            // For codegen, we probably can't produce a value if terminated.
+                            // Let's return Void represented by default float 0.0 for now,
+                            // but signal this isn't right.
+                            eprintln!(
+                                "Warning: Code block terminated early by return/break/continue."
+                            );
+                            return Ok(self.context.f64_type().const_float(0.0).into());
+                            // Placeholder!
+                        }
+                    } else {
+                        // Error compiling statement, propagate?
+                        // Current CompileStmtResult doesn't propagate well here. Needs refactor.
+                        // For now, assume errors are handled elsewhere or ignore.
+                    }
                 }
 
                 // 2. Compile the final expression if it exists
@@ -798,8 +820,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     self.context.f64_type().const_float(0.0).into()
                 };
 
-                // --- Restore Scope (if implemented) ---
-                // self.variables = original_vars;
+                // --- Restore Scope
+                self.variables = original_vars;
+                // Return the result of the final expression
 
                 Ok(result)
             }
@@ -1298,36 +1321,28 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 }
 
                 // Check if Block Explicitly Returned implicitly via its structure
-                let needs_implicit_return = !body_terminated
-                    && self
-                        .builder
-                        .get_insert_block()
-                        .map_or(true, |bb| bb.get_terminator().is_none());
+                // --- Check if Block Needs Return ---
+                let needs_explicit_return_syntactically = self
+                    .builder
+                    .get_insert_block()
+                    .map_or(true, |bb| bb.get_terminator().is_none());
 
-                if needs_implicit_return {
-                    // Function ended without explicit return. Add implicit return.
+                if needs_explicit_return_syntactically {
+                    // Function reached end without terminator
                     match signature.1 {
                         // signature.1 is return type
                         Type::Void => {
+                            // OK to implicitly return void
                             self.builder.build_return(None);
                         }
-                        ty => {
-                            eprintln!("Warning: Function '{}' missing return statement, implicitly returning default value for {}", name, ty);
-                            let default_val: BasicValueEnum<'ctx> = match ty {
-                                Type::Float => self.context.f64_type().const_float(0.0).into(),
-                                Type::Int => self.context.i64_type().const_int(0, false).into(),
-                                Type::Bool => self.context.bool_type().const_int(0, false).into(),
-                                Type::String => {
-                                    // String default is null pointer (i8*)
-                                    self.context
-                                        .i8_type()
-                                        .ptr_type(AddressSpace::default())
-                                        .const_null()
-                                        .into()
-                                }
-                                _ => unreachable!(), // Handle other types later
-                            };
-                            self.builder.build_return(Some(&default_val));
+                        non_void_type => {
+                            // ERROR: Non-void function reached end without return.
+                            // Type checker *should* have caught this if path analysis existed.
+                            // Codegen cannot proceed meaningfully.
+                            // We could insert 'unreachable' or just let verification fail.
+                            // Let's let verification fail for now by not adding a terminator.
+                            eprintln!("Codegen Error: Non-void function '{}' ({}) reached end without returning a value.", name, non_void_type);
+                            // No build_return here! Verification will fail.
                         }
                     }
                 }

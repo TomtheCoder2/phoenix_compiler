@@ -19,7 +19,7 @@ pub extern "C" fn print_bool_wrapper(value: bool) {
 }
 
 #[no_mangle]
-pub extern "C" fn print_str_wrapper(c_string_ptr: *const c_char) {
+pub unsafe extern "C" fn print_str_wrapper(c_string_ptr: *const c_char) {
     if c_string_ptr.is_null() {
         // Handle null pointer case if necessary
         println!("<NULL_STR>");

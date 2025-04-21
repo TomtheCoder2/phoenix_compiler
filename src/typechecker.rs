@@ -301,7 +301,7 @@ impl TypeChecker {
                 }
 
                 // Check the body statements
-                let _ = self.check_program_block(body); // Check body, collect errors
+                self.check_program_block(body); // Check body, collect errors
 
                 // TODO: Check return value consistency within body - complex!
 
@@ -336,14 +336,18 @@ impl TypeChecker {
                     (Some(expr), expected_type) => {
                         // Check the expression and its type
                         if let Some(found_type) = self.check_expression(expr) {
-                            // Check if found type matches expected return type
-                            if found_type != expected_type {
+                            if found_type == Type::Void {
+                                // Cannot return result of a void expression (e.g. return print(x);)
+                                self.errors.push(TypeError::ReturnTypeMismatch {
+                                    expected: expected_type,
+                                    found: Type::Void,
+                                });
+                            } else if found_type != expected_type {
                                 self.errors.push(TypeError::ReturnTypeMismatch {
                                     expected: expected_type,
                                     found: found_type,
                                 });
                             }
-                            // If types match, it's OK.
                         }
                         // If check_expression returned None, error already recorded
                     }
@@ -525,6 +529,7 @@ impl TypeChecker {
                     || name == "print_str"
                     || name == "print_int"
                     || name == "print_bool"
+                    || name == "print_float"
                     || name == "println"
                 {
                     if args.len() != 1 {
