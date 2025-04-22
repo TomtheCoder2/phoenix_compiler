@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use crate::ast::{
         def, BinaryOperator, BinaryOperator::*, ComparisonOperator, Expression, ExpressionKind,
         ExpressionKind::*, StatementKind, StatementKind::*, TypeNodeKind, UnaryOperator,
@@ -958,6 +959,50 @@ mod tests {
                 }
             }
             _ => panic!("Expected LetBinding"),
+        }
+    }
+
+    #[test]
+    fn test_parse_plus_plus() {
+        let input = "x++;";
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::ExpressionStmt (
+                s
+            ) => {
+                // let value = Expression::new(
+                //     ExpressionKind::BinaryOp {
+                //         op,
+                //         left: Box::new(left.clone()),
+                //         right: Box::new(Expression {
+                //             kind: ExpressionKind::IntLiteral(1),
+                //             span: left.span.clone(),
+                //             resolved_type: RefCell::new(None),
+                //         }),
+                //     },
+                //     left.span.clone(),
+                // );
+                // left = Expression::new(
+                //     ExpressionKind::Assignment {
+                //         target: Box::new(left.clone()),
+                //         value: Box::new(value),
+                //     },
+                //     left.span.clone(),
+                // );
+                match &s.kind {
+                    ExpressionKind::Assignment { target, value } => {
+                        match &target.kind {
+                            ExpressionKind::Variable(name) => assert_eq!(name, "x"),
+                            _ => panic!("Expected Variable for target"),
+                        }
+                    }
+                    _ => panic!("Expected Assignment expression"),
+                }
+            }
+            _ => panic!("Expected ExpressionStmt"),
         }
     }
 }

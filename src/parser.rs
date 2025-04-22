@@ -1,6 +1,7 @@
 // src/parser.rs
 
 // Use the new AST structures
+use crate::ast::ExpressionKind::BinaryOp;
 use crate::ast::{
     BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program, Statement,
     StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
@@ -9,6 +10,7 @@ use crate::lexer::Lexer;
 use crate::location::{Location, Span};
 use crate::parser::Precedence::Lowest;
 use crate::token::{Token, TokenKind};
+use std::cell::RefCell;
 use std::fmt;
 
 // --- ParseError --- (Adjust as needed)
@@ -107,7 +109,13 @@ enum Precedence {
 // Map tokens to precedence levels
 fn token_precedence(token: &TokenKind) -> Precedence {
     match token {
-        TokenKind::Assign => Precedence::Assign,
+        TokenKind::Assign
+        | TokenKind::PlusPlus
+        | TokenKind::PlusAssign
+        | TokenKind::MinusMinus
+        | TokenKind::MinusAssign
+        | TokenKind::StarAssign
+        | TokenKind::SlashAssign => Precedence::Assign,
         TokenKind::Equal | TokenKind::NotEqual => Precedence::Equals,
         TokenKind::LessThan
         | TokenKind::GreaterThan
@@ -525,8 +533,6 @@ impl<'a> Parser<'a> {
         Ok(StatementKind::ExpressionStmt(expr))
     }
 
-    // --- Expression Parsing (Pratt Parser - mostly unchanged internally) ---
-
     // --- Expression Parsing (Updated Pratt Parser) ---
     fn parse_expression(&mut self, precedence: Precedence) -> ParseResult<Expression> {
         let start_loc = self.current_token.loc.clone();
@@ -601,30 +607,100 @@ impl<'a> Parser<'a> {
                         span,
                     );
                 }
-                TokenKind::Assign => {
+                TokenKind::Assign
+                | TokenKind::PlusPlus
+                | TokenKind::PlusAssign
+                | TokenKind::MinusMinus
+                | TokenKind::MinusAssign
+                | TokenKind::StarAssign
+                | TokenKind::SlashAssign => {
                     // Check if 'left' is a valid L-value (Variable or IndexAccess)
                     match left.kind {
-                        ExpressionKind::Variable(_) | ExpressionKind::IndexAccess {..} => {
+                        ExpressionKind::Variable(_) | ExpressionKind::IndexAccess { .. } => {
                             // OK, proceed with assignment
                         }
                         _ => {
                             // Invalid target
-                            return Err(ParseError::InvalidAssignmentTarget { target: format!("{:?}", left), loc: left.span.start.clone() });
+                            return Err(ParseError::InvalidAssignmentTarget {
+                                target: format!("{:?}", left),
+                                loc: left.span.start.clone(),
+                            });
                         }
                     };
 
                     let current_precedence = token_precedence(&infix_token.kind);
-                    self.next_token(); // Consume '='
+                    match infix_token.kind {
+                        TokenKind::Assign
+                        | TokenKind::PlusAssign
+                        | TokenKind::MinusAssign
+                        | TokenKind::StarAssign
+                        | TokenKind::SlashAssign => {
+                            self.next_token(); // Consume '='
 
-                    // Parse RHS (handle right-associativity carefully if needed)
-                    let value = self.parse_expression(current_precedence)?; // Use same precedence for now
+                            // Parse RHS (handle right-associativity carefully if needed)
+                            let value = self.parse_expression(current_precedence)?; // Use same precedence for now
+                            let op = match infix_token.kind {
+                                TokenKind::Assign => None,
+                                TokenKind::PlusAssign => Some(BinaryOperator::Add),
+                                TokenKind::MinusAssign => Some(BinaryOperator::Subtract),
+                                TokenKind::StarAssign => Some(BinaryOperator::Multiply),
+                                TokenKind::SlashAssign => Some(BinaryOperator::Divide),
+                                _ => unreachable!(),
+                            };
+                            let value = if let Some(op) = op {
+                                let span = left.span.combine(&value.span).clone();
+                                Expression::new(
+                                    BinaryOp {
+                                        op,
+                                        left: Box::new(left.clone()), // Use original left as LHS
+                                        right: Box::new(value),
+                                    },
+                                    span,
+                                )
+                            } else {
+                                value
+                            };
 
-                    let combined_span = left.span.combine(&value.span);
-                    // Create Assignment node with the *entire* left expression as target
-                    left = Expression::new(
-                        ExpressionKind::Assignment { target: Box::new(left), value: Box::new(value) },
-                        combined_span
-                    );
+                            let combined_span = left.span.combine(&value.span);
+                            // Create Assignment node with the *entire* left expression as target
+                            left = Expression::new(
+                                ExpressionKind::Assignment {
+                                    target: Box::new(left.clone()),
+                                    value: Box::new(value),
+                                },
+                                combined_span,
+                            );
+                        }
+                        TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                            self.next_token();
+
+                            let op = match infix_token.kind {
+                                TokenKind::PlusPlus => BinaryOperator::Add,
+                                TokenKind::MinusMinus => BinaryOperator::Subtract,
+                                _ => unreachable!(),
+                            };
+                            let value = Expression::new(
+                                ExpressionKind::BinaryOp {
+                                    op,
+                                    left: Box::new(left.clone()),
+                                    right: Box::new(Expression {
+                                        kind: ExpressionKind::IntLiteral(1),
+                                        span: left.span.clone(),
+                                        resolved_type: RefCell::new(None),
+                                    }),
+                                },
+                                left.span.clone(),
+                            );
+                            left = Expression::new(
+                                ExpressionKind::Assignment {
+                                    target: Box::new(left.clone()),
+                                    value: Box::new(value),
+                                },
+                                left.span.clone(),
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
                 } // End Assign case
                 TokenKind::LBracket => {
                     // --- Index Operator ---
@@ -678,7 +754,10 @@ impl<'a> Parser<'a> {
                 Ok(Expression::new(ExpressionKind::Variable(n), span))
             }
             // Grouping
-            TokenKind::LParen => {self.next_token(); self.parse_grouped_expression(start_loc) }, // Returns full Expression struct
+            TokenKind::LParen => {
+                self.next_token();
+                self.parse_grouped_expression(start_loc)
+            } // Returns full Expression struct
             // [
             TokenKind::LBracket => self.parse_vector_literal(start_loc),
             // If Expression

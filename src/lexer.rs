@@ -71,9 +71,36 @@ impl<'a> Lexer<'a> {
 
         let kind = match self.current_char {
             // Single char tokens
-            Some('+') => TokenKind::Plus,
-            Some('-') => TokenKind::Minus,
-            Some('*') => TokenKind::Star,
+            Some('+') => {
+                if self.peek_char == Some('+') {
+                    self.read_char(); // Consume second '+'
+                    TokenKind::PlusPlus // '++'
+                } else if self.peek_char == Some('=') {
+                    self.read_char(); // Consume '='
+                    TokenKind::PlusAssign // '+='
+                } else {
+                    TokenKind::Plus // Regular plus
+                }
+            }
+            Some('-') => {
+                if self.peek_char == Some('-') {
+                    self.read_char(); // Consume second '-'
+                    TokenKind::MinusMinus // '--'
+                } else if self.peek_char == Some('=') {
+                    self.read_char(); // Consume '='
+                    TokenKind::MinusAssign // '-='
+                } else {
+                    TokenKind::Minus // Regular minus
+                }
+            }
+            Some('*') => {
+                if self.peek_char == Some('=') {
+                    self.read_char(); // Consume '='
+                    TokenKind::StarAssign // '*='
+                } else {
+                    TokenKind::Star // Regular multiplication
+                }
+            }
             Some('/') => {
                 // Check for comment first
                 if self.peek_char == Some('/') {
@@ -89,6 +116,9 @@ impl<'a> Lexer<'a> {
                     // After loop, current_char is potentially '\n' or None.
                     // We need the TokenKind *after* the comment.
                     return self.next_token(); // Recurse
+                } else if self.peek_char == Some('=') {
+                    self.read_char();
+                    TokenKind::SlashAssign
                 } else {
                     TokenKind::Slash // Regular division
                 }
@@ -675,6 +705,33 @@ mod tests {
         let input = "return;";
         let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![TokenKind::Return, TokenKind::Semicolon, TokenKind::Eof];
+        for expected in tokens {
+            assert_eq!(l.next_token().kind, expected);
+        }
+    }
+
+    #[test]
+    fn test_plusplus() {
+        let input = "x++";
+        let mut l = Lexer::new("test.txt".to_string(), input);
+        let tokens = vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::PlusPlus
+        ];
+        for expected in tokens {
+            assert_eq!(l.next_token().kind, expected);
+        }
+    }
+
+    #[test]
+    fn test_plus_assign() {
+        let input = "x+=1";
+        let mut l = Lexer::new("test.txt".to_string(), input);
+        let tokens = vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::PlusAssign,
+            TokenKind::IntNum(1),
+        ];
         for expected in tokens {
             assert_eq!(l.next_token().kind, expected);
         }

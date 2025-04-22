@@ -30,7 +30,7 @@ fun main() {
     println(fibonacci(10));
 
     // Control flow
-    for (var i = 0; i < 5; i = i + 1) {
+    for (var i = 0; i < 5; i++) {
         if (i > 2) {
             println("Bigger than 2");
         } else {

@@ -31,11 +31,17 @@ pub enum TokenKind {
     StringLiteral(String), // Added for string literals
 
     // Operators
-    Plus,   // '+'
-    Minus,  // '-'
-    Star,   // '*'
-    Slash,  // '/'
-    Assign, // '='
+    Plus,        // '+'
+    PlusAssign,  // '+='
+    PlusPlus,    // '++'
+    Minus,       // '-'
+    MinusAssign, // '-='
+    MinusMinus,  // '--'
+    Star,        // '*'
+    StarAssign,  // '*='
+    Slash,       // '/'
+    SlashAssign, // '/='
+    Assign,      // '='
 
     // Comparison Operators (Added)
     LessThan,     // '<'
@@ -58,8 +64,8 @@ pub enum TokenKind {
     LBrace,    // '{'
     RBrace,    // '}'
     Colon,     // ':' // for type annotations (e.g., let x: int)
-    LBracket, // '[' // Added for indexing & literals
-    RBracket, // ']' // Added
+    LBracket,  // '[' // Added for indexing & literals
+    RBracket,  // ']' // Added
 
     // Keywords
     Let,    // 'let'
@@ -91,5 +97,3 @@ pub fn keyword_to_type(ident: &str) -> Option<Type> {
         _ => None,
     }
 }
-
-
