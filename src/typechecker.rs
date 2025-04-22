@@ -68,6 +68,13 @@ pub enum TypeError {
         span: Span,
     }, // In literal or assignment
     CannotInferVectorType(Span), // e.g., for empty literal []
+    PushNotVector(Type, Span),   // Target of push isn't vector
+    PushElementTypeMismatch {
+        vec_type: Type,
+        elem_type: Type,
+        span: Span,
+    }, // Wrong type pushed
+    AssignIndexTargetNotVector(Type, Span), // Target of index assign isn't vector
 }
 // src/typechecker.rs
 impl fmt::Display for TypeError {
@@ -201,6 +208,20 @@ impl fmt::Display for TypeError {
             TypeError::CannotInferVectorType(span) => {
                 write!(f, "{} Cannot infer vector type from empty literal", span)
             }
+            TypeError::PushNotVector(ty, span) => {
+                write!(f, "{} Cannot push to type {} (must be a vector)", span, ty)
+            }
+            TypeError::PushElementTypeMismatch {
+                vec_type,
+                elem_type,
+                span,
+            } => {
+                // Wrong type pushed
+                write!(f, "{} Cannot push element with type {} to vector containing elements with type {}", span, elem_type, vec_type)
+            }
+            TypeError::AssignIndexTargetNotVector(ty, span) => {
+                write!(f, "{} Cannot index into type {}", span, ty)
+            }
         }
     }
 }
@@ -265,16 +286,15 @@ impl TypeChecker {
             } = &statement.kind
             {
                 // type resolution
-                let param_types: Vec<Type> =
-                    params
-                        .iter()
-                        .map(|(_, opt_node)| {
-                            opt_node
-                                .as_ref()
-                                .and_then(|n| resolve_type_node(n, &mut self.errors))
-                        })
-                        .collect::<Option<Vec<Type>>>() // Collects Option<Type>, fails if any param type is None
-                        .unwrap_or_else(|| vec![]); // Default empty vector if resolution failed
+                let param_types: Vec<Type> = params
+                    .iter()
+                    .map(|(_, opt_node)| {
+                        opt_node
+                            .as_ref()
+                            .and_then(|n| resolve_type_node(n, &mut self.errors))
+                    })
+                    .collect::<Option<Vec<Type>>>() // Collects Option<Type>, fails if any param type is None
+                    .unwrap_or_else(|| vec![]); // Default empty vector if resolution failed
                 let return_type = return_type_ann
                     .as_ref()
                     .and_then(|n| resolve_type_node(n, &mut self.errors))
@@ -621,44 +641,128 @@ impl TypeChecker {
                     })
             }
             ExpressionKind::Assignment { target, value } => {
-                // Check target exists and is mutable
-                let target_info = match self.symbol_table.lookup_variable(target) {
-                    Some(info) => info, // Copy info
-                    None => {
-                        self.errors
-                            .push(TypeError::UndefinedVariable(target.clone(), span));
-                        return None;
-                    }
-                }
-                .clone();
-                if !target_info.is_mutable {
-                    self.errors
-                        .push(TypeError::AssignmentToImmutable(target.clone(), span));
-                    // Continue checking value type, but assignment itself is invalid type-wise?
-                    // Let's return None to signify the assignment expression itself has an error
-                    let _ = self.check_expression(value); // Still check RHS for errors
-                    return None;
-                }
-
-                // Check value type matches target type
+                // Check the type of the RHS first
                 let Some(value_type) = self.check_expression(value) else {
                     return None;
                 };
                 if value_type == Type::Void {
-                    self.errors
-                        .push(TypeError::VoidAssignment(target.clone(), span));
+                    self.errors.push(TypeError::VoidAssignment(
+                        target.to_code(),
+                        value.span.clone(),
+                    ));
                     return None;
                 }
-                if target_info.ty != value_type {
-                    self.errors.push(TypeError::TypeMismatch {
-                        expected: target_info.ty,
-                        found: value_type,
-                        context: format!("assignment to '{}'", target),
-                        span,
-                    });
-                    return None; // Assignment fails type check
-                }
-                Some(value_type) // Assignment yields value type
+
+                // --- Check L-value Target ---
+                match &target.kind {
+                    // Case 1: Simple variable assignment
+                    ExpressionKind::Variable(name) => {
+                        let target_info = match self.symbol_table.lookup_variable(name) {
+                            Some(info) => info,
+                            None => {
+                                self.errors
+                                    .push(TypeError::UndefinedVariable(name.clone(), span));
+                                return None;
+                            }
+                        };
+                        if !target_info.is_mutable {
+                            self.errors.push(TypeError::AssignmentToImmutable(
+                                name.clone(),
+                                target.span.clone(),
+                            ));
+                            return None;
+                        }
+                        if target_info.ty != value_type {
+                            self.errors.push(TypeError::TypeMismatch {
+                                expected: target_info.ty.clone(),
+                                found: value_type,
+                                context: format!("variable '{}'", name),
+                                span: value.span.clone(),
+                            });
+                            return None;
+                        }
+                        Some(value_type) // Assign yields value type
+                    }
+                    // Case 2: Index assignment: vec[idx] = value
+                    ExpressionKind::IndexAccess {
+                        target: vec_expr,
+                        index,
+                    } => {
+                        // Check index type
+                        let Some(index_type) = self.check_expression(index) else {
+                            return None;
+                        };
+                        if index_type != Type::Int {
+                            self.errors
+                                .push(TypeError::IndexNotInteger(index_type, span));
+                            /* Maybe continue? */
+                        }
+
+                        // Check target is a vector and mutable (indirectly?)
+                        // We need to know if the *vector handle itself* refers to something mutable.
+                        // Let's assume for now if the variable holding the vector is `var`, we can mutate element.
+                        // This check needs refinement based on ownership/borrowing if added later.
+                        let Some(target_type) = self.check_expression(vec_expr) else {
+                            return None;
+                        };
+
+                        match target_type {
+                            Type::Vector(elem_type) => {
+                                // Check if vec_expr is assignable (e.g., if it's a 'var')
+                                // Simple check: If vec_expr is just a Variable, check its mutability.
+                                if let ExpressionKind::Variable(var_name) = &vec_expr.kind {
+                                    if let Some(info) = self.symbol_table.lookup_variable(var_name)
+                                    {
+                                        if !info.is_mutable {
+                                            self.errors.push(TypeError::AssignmentToImmutable(
+                                                format!("{}[...]", var_name),
+                                                target.span.clone(),
+                                            ));
+                                            // Fallthrough to check types anyway? Or return None? Let's return None.
+                                            return None;
+                                        }
+                                    } // Else: UndefinedVariable already caught
+                                }
+                                // Else: Assigning to complex expr index? Disallow for now.
+                                else {
+                                    self.errors.push(TypeError::InvalidAssignmentTarget(
+                                        target.to_code(),
+                                        vec_expr.span.clone(),
+                                    ));
+                                    return None;
+                                }
+
+                                // Check if value type matches vector element type
+                                if *elem_type != value_type {
+                                    self.errors.push(TypeError::TypeMismatch {
+                                        expected: *elem_type,
+                                        found: value_type,
+                                        context: "index assignment".to_string(),
+                                        span: value.span.clone(),
+                                    });
+                                    return None;
+                                }
+                                // Index assignment expression yields the assigned value's type
+                                Some(value_type)
+                            }
+                            _ => {
+                                self.errors.push(TypeError::AssignIndexTargetNotVector(
+                                    target_type,
+                                    vec_expr.span.clone(),
+                                ));
+                                None
+                            }
+                        }
+                    }
+                    // Invalid L-value (e.g., literal = value)
+                    _ => {
+                        self.errors.push(TypeError::InvalidAssignmentTarget(
+                            target.to_code(),
+                            target.span.clone(),
+                        ));
+                        None
+                    }
+                } // End match target.kind
             }
             ExpressionKind::BinaryOp { op, left, right } => {
                 let left_type_opt = self.check_expression(left);
@@ -745,12 +849,47 @@ impl TypeChecker {
                     // TODO: More specific type check for each print variant if needed
                     Some(Type::Void) // Print calls evaluate to Void
                 }
+                // --- >>> NEW: push built-in <<< ---
+                else if name == "push" {
+                    // Expect 2 args: push(vector, element)
+                    if args.len() != 2 {
+                        self.errors.push(TypeError::IncorrectArgCount {
+                            func_name: name.clone(),
+                            expected: 2,
+                            found: args.len(),
+                            call_site: span,
+                        });
+                        return Some(Type::Void); // Still returns Void even on error?
+                    }
+                    let vec_type_opt = self.check_expression(&args[0]); // Check first arg (vector)
+                    let elem_type_opt = self.check_expression(&args[1]); // Check second arg (element)
+
+                    // Check if first arg is vector and get element type
+                    if let Some(Type::Vector(expected_elem_type)) = vec_type_opt {
+                        // Check if second arg type matches element type
+                        if let Some(actual_elem_type) = elem_type_opt {
+                            if *expected_elem_type != actual_elem_type {
+                                self.errors.push(TypeError::PushElementTypeMismatch {
+                                    vec_type: Type::Vector(expected_elem_type.clone()), // Provide vec type for context
+                                    elem_type: actual_elem_type,
+                                    span: args[1].span.clone(),
+                                });
+                            }
+                        } // Else: error checking element already recorded
+                    } else if let Some(other_type) = vec_type_opt {
+                        // First arg wasn't a vector
+                        self.errors
+                            .push(TypeError::PushNotVector(other_type, args[0].span.clone()));
+                    } // Else: error checking vector arg already recorded
+
+                    Some(Type::Void) // Assume push returns Void
+                }
                 // --- User Functions ---
                 else {
                     match self.symbol_table.lookup_function(name).cloned() {
                         // Clone sig
                         Some(signature) => {
-                            if args.len() != signature.param_types.len() { 
+                            if args.len() != signature.param_types.len() {
                                 // Error: incorrect arg count
                                 self.errors.push(TypeError::IncorrectArgCount {
                                     func_name: name.clone(),
@@ -769,7 +908,11 @@ impl TypeChecker {
                                     self.errors.push(TypeError::TypeMismatch {
                                         expected: expected.clone(),
                                         found: arg_type,
-                                        context: format!("argument {} of function '{}'", i + 1, name),
+                                        context: format!(
+                                            "argument {} of function '{}'",
+                                            i + 1,
+                                            name
+                                        ),
                                         span: args[i].span.clone(),
                                     });
                                 }
@@ -881,7 +1024,8 @@ impl TypeChecker {
                 // Ensure index is Int
                 if let Some(it) = index_type_opt {
                     if it != Type::Int {
-                        self.errors.push(TypeError::IndexNotInteger(it, index.span.clone()));
+                        self.errors
+                            .push(TypeError::IndexNotInteger(it, index.span.clone()));
                     }
                 } // else: error already recorded in index check
 
@@ -895,7 +1039,8 @@ impl TypeChecker {
                     // Some(Type::String) => Some(Type::Char) // Hypothetical
                     Some(other_type) => {
                         // Target is not a vector (or string)
-                        self.errors.push(TypeError::NotAVector(other_type, target.span.clone()));
+                        self.errors
+                            .push(TypeError::NotAVector(other_type, target.span.clone()));
                         None
                     }
                     None => None, // Error checking target

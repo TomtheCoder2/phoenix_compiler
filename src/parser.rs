@@ -78,7 +78,7 @@ impl fmt::Display for ParseError {
             ParseError::InvalidAssignmentTarget { target, loc } => {
                 write!(
                     f,
-                    "Parse Error at {}: Invalid assignment target '{}'",
+                    "Parse Error at {}: Invalid assignment target (must be variable or index access)'{}'",
                     loc, target
                 )
             }
@@ -597,39 +597,30 @@ impl<'a> Parser<'a> {
                     );
                 }
                 TokenKind::Assign => {
-                    // Ensure the left side is a valid assignment target (Identifier/Variable)
-                    let target_name = match left.kind {
-                        ExpressionKind::Variable(name) => name,
-                        // Add cases later for field access (obj.field = ...) or array index (arr[i] = ...)
+                    // Check if 'left' is a valid L-value (Variable or IndexAccess)
+                    match left.kind {
+                        ExpressionKind::Variable(_) | ExpressionKind::IndexAccess {..} => {
+                            // OK, proceed with assignment
+                        }
                         _ => {
-                            return Err(ParseError::InvalidAssignmentTarget {
-                                target: format!("{:?}", left),
-                                loc: left.span.start,
-                            });
+                            // Invalid target
+                            return Err(ParseError::InvalidAssignmentTarget { target: format!("{:?}", left), loc: left.span.start.clone() });
                         }
                     };
 
-                    let current_precedence = token_precedence(&self.current_token.kind);
+                    let current_precedence = token_precedence(&infix_token.kind);
                     self.next_token(); // Consume '='
 
-                    // Assignment is right-associative, so parse RHS with slightly lower precedence
-                    // (or equal precedence if definition strictly requires right-associativity handling)
-                    // Let's use current_precedence for now, assuming basic handling.
-                    // To be truly right-associative (x = y = 5 -> x = (y = 5)), the recursive
-                    // call might need precedence `current_precedence - 1` or similar adjustment.
-                    // Sticking with `current_precedence` makes it effectively non-associative here,
-                    // requiring parentheses for chained assignment like `x = (y = 5);`.
-                    let value = self.parse_expression(current_precedence)?;
+                    // Parse RHS (handle right-associativity carefully if needed)
+                    let value = self.parse_expression(current_precedence)?; // Use same precedence for now
 
-                    let span = left.span.combine(&value.span); // Combine spans
+                    let combined_span = left.span.combine(&value.span);
+                    // Create Assignment node with the *entire* left expression as target
                     left = Expression::new(
-                        ExpressionKind::Assignment {
-                            target: target_name,
-                            value: Box::new(value),
-                        },
-                        span,
+                        ExpressionKind::Assignment { target: Box::new(left), value: Box::new(value) },
+                        combined_span
                     );
-                }
+                } // End Assign case
                 TokenKind::LBracket => {
                     // --- Index Operator ---
                     self.next_token(); // Consume '['

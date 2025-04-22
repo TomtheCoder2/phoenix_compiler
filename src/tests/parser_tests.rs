@@ -614,29 +614,51 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_assignment_expression() {
-        let input = "x = y + 1;"; // Assign result of y+1 to x
+    fn test_parse_index_assignment() {
+        let input = "my_vec[0] = 100;";
         let lexer = Lexer::new("test".to_string(), input);
         let mut parser = Parser::new(lexer);
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0].kind {
-            ExpressionStmt(expr) => match &expr.kind {
-                Assignment { target, value } => {
-                    assert_eq!(target, "x");
-                    match &value.kind {
-                        BinaryOp { op, left, right } => {
-                            assert_eq!(*op, Add);
-                            assert_eq!(left.kind, Variable("y".to_string()));
-                            assert_eq!(right.kind, IntLiteral(1));
+            StatementKind::ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::Assignment { target, value } => {
+                    // Check target is IndexAccess
+                    match &target.kind {
+                        ExpressionKind::IndexAccess { target: vec_expr, index } => {
+                            match &vec_expr.kind {
+                                ExpressionKind::Variable(name) => assert_eq!(name, "my_vec"),
+                                _ => panic!("Expected var target in index")
+                            }
+                            match &index.kind {
+                                ExpressionKind::IntLiteral(i) => assert_eq!(*i, 0),
+                                _ => panic!("Expected int literal index")
+                            }
                         }
-                        _ => panic!("Assignment value was not BinaryOp"),
+                        _ => panic!("Assignment target not IndexAccess"),
                     }
+                    // Check value is IntLiteral(100)
+                    assert_eq!(value.kind, ExpressionKind::IntLiteral(100));
                 }
-                _ => panic!("Expected Assignment expression"),
+                _ => panic!("Expected Assignment Expression"),
             },
             _ => panic!("Expected ExpressionStmt"),
         }
+    }
+
+    #[test]
+    fn test_parse_push_call() { // Parses like a normal function call
+        let input = "push(my_vec, 5);";
+        // todo
+        // ... assert AST is ExpressionStmt(FunctionCall{ name:"push", args:[Variable("my_vec"), IntLit(5)] }) ...
+    }
+
+    #[test]
+    fn test_parse_invalid_assign_target() {
+        let input = "5 = x;";
+        // ... assert error is InvalidAssignmentTarget ...
+        let input2 = "(x+y) = 10;";
+        // ... assert error is InvalidAssignmentTarget ...
     }
 
     #[test]

@@ -771,6 +771,63 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                     // Print functions return 0.0 float for now
                     Ok(self.context.f64_type().const_float(0.0).into())
+                } else if name == "push" {
+                    // Args validated by type checker: args[0] is vec handle, args[1] is element
+                    let vec_handle_val = self.compile_expression(&args[0])?;
+                    let elem_val = self.compile_expression(&args[1])?;
+                    let vec_handle_ptr = match vec_handle_val { 
+                        BasicValueEnum::PointerValue(pv)
+                        if pv.get_type()
+                            == self.context.i8_type().ptr_type(AddressSpace::default()) => {
+                            pv
+                        }
+                        _ => {
+                            return Err(CodeGenError::InvalidType(
+                                format!(
+                                    "Expected vector handle (i8*), found {:?}",
+                                    vec_handle_val.get_type()
+                                ),
+                                span,
+                            ))
+                        }
+                    };
+
+                    // Allocate temp space for element, store it, get i8* pointer
+                    let temp_alloca = match self
+                        .builder
+                        .build_alloca(elem_val.get_type(), "push_val_alloca"){
+                        Ok(val) => val,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("LLVM error during alloca: {}", e),
+                                span,
+                            ))
+                        }
+                    };
+                    self.builder.build_store(temp_alloca, elem_val);
+                    let value_ptr_i8 = match self.builder.build_pointer_cast(
+                        temp_alloca,
+                        self.context.i8_type().ptr_type(AddressSpace::default()),
+                        "push_val_ptr",
+                    ){
+                        Ok(val) => val,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("LLVM error during pointer cast: {}", e),
+                                span,
+                            ))
+                        }
+                    };
+
+                    // Call runtime push function
+                    let vec_push_func = self.get_or_declare_vec_push();
+                    self.builder.build_call(
+                        vec_push_func,
+                        &[vec_handle_ptr.into(), value_ptr_i8.into()],
+                        "",
+                    );
+
+                    Ok(self.context.f64_type().const_float(0.0).into()) // push returns "void" (0.0 float placeholder)
                 }
                 // --- User Function Call ---
                 else {
@@ -866,49 +923,137 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } // End FunctionCall
             // --- Assignment ---
             ExpressionKind::Assignment { target, value } => {
-                // 1. Compile the RHS value
-                let compiled_value = self.compile_expression(value)?;
+                // Compile RHS first
+                let compiled_rhs_value = self.compile_expression(value)?;
 
-                // 2. Look up the target variable
-                let var_info = self
-                    .variables
-                    .get(target)
-                    .ok_or_else(|| CodeGenError::UndefinedVariable(target.clone(), span.clone()))?;
-
-                // 3. Check mutability
-                if !var_info.is_mutable {
-                    return Err(CodeGenError::AssignmentToImmutable(target.clone(), span));
-                }
-
-                // 4. Check Type Match (Basic - needs proper type checking/conversion)
-                let expected_llvm_type = match var_info.ty.to_llvm_basic_type(self.context) {
-                    Some(llvm_type) => llvm_type,
-                    None => {
-                        return Err(CodeGenError::InvalidType(
-                            format!("Invalid type for variable '{}'", target),
-                            span,
-                        ))
+                // --- Generate code based on L-value target ---
+                match &target.kind {
+                    // Case 1: Variable Assignment: target is Variable(name)
+                    ExpressionKind::Variable(name) => {
+                        let var_info = self.variables.get(name).ok_or(
+                            CodeGenError::UndefinedVariable(name.clone(), span.clone()),
+                        )?;
+                        // Type/Mutability checked by Type Checker already, but double check type?
+                        let expected_llvm_type = var_info.ty.to_llvm_basic_type(self.context).unwrap();
+                        if compiled_rhs_value.get_type() != expected_llvm_type {
+                            return Err(CodeGenError::InvalidType(
+                                format!(
+                                    "Assignment type mismatch for variable '{}': expected {:?}, found {:?}",
+                                    name, expected_llvm_type, compiled_rhs_value.get_type()
+                                ),
+                                span,
+                            ));
+                        }
+                        // Generate store
+                        self.builder.build_store(var_info.ptr, compiled_rhs_value);
+                        Ok(compiled_rhs_value) // Return assigned value
                     }
-                };
-                if compiled_value.get_type() != expected_llvm_type {
-                    // TODO: Implement type conversion or error properly
-                    return Err(CodeGenError::InvalidType(
+                    // Case 2: Index Assignment: target is IndexAccess { target: vec_expr, index }
+                    ExpressionKind::IndexAccess { target: vec_expr, index } => {
+                        // Compile vector handle and index
+                        let vec_handle_val = self.compile_expression(vec_expr)?;
+                        let index_val = self.compile_expression(index)?;
+                        let vec_handle_ptr = match vec_handle_val {
+                            BasicValueEnum::PointerValue(pv) => pv,
+                            _ => {
+                                return Err(CodeGenError::InvalidType(
+                                    format!(
+                                        "Expected vector handle to be a pointer, found {:?}",
+                                        vec_handle_val.get_type()
+                                    ),
+                                    span,
+                                ))
+                            }
+                        };
+                        let index_i64 = match index_val {
+                            BasicValueEnum::IntValue(iv) => {
+                                if iv.get_type().get_bit_width() == 64 {
+                                    iv
+                                } else {
+                                    return Err(CodeGenError::InvalidType(
+                                        format!(
+                                            "Index must be i64, found {:?}",
+                                            index_val.get_type()
+                                        ),
+                                        span,
+                                    ))
+                                }
+                            }
+                            _ => {
+                                return Err(CodeGenError::InvalidType(
+                                    format!(
+                                        "Expected index to be an integer, found {:?}",
+                                        index_val.get_type()
+                                    ),
+                                    span,
+                                ))
+                            }
+                        };
+
+                        // Get element type from vec_expr's resolved type
+                        let target_resolved_type = vec_expr.resolved_type.borrow().clone();
+                        let elem_toy_type = match target_resolved_type {
+                            Some(Type::Vector(et)) => *et,
+                            _ => return Err(CodeGenError::InvalidType(
+                                format!("{} Cannot index into non-vector type {:?}", span, target_resolved_type),
+                                span,
+                            )),
+                        };
+                        let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
+
+                        // Type check RHS value (redundant if TC works, but safer)
+                        if compiled_rhs_value.get_type() != elem_llvm_type { /* Error */ }
+
+                        // Get pointer to element slot using vec_get_ptr
+                        let vec_get_ptr_func = self.get_or_declare_vec_get_ptr();
+                        let elem_ptr_i8 = match self.builder.build_call(vec_get_ptr_func, &[vec_handle_ptr.into(), index_i64.into()], "elem_ptr_i8") {
+                            Ok(el) => el,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during vector get pointer: {}", e),
+                                    span,
+                                ))
+                            }
+                        }
+                            .try_as_basic_value().left().ok_or(
+                                CodeGenError::LlvmError(
+                                    "Failed to get element pointer from vector".to_string(),
+                                    span.clone(),
+                                )
+                        )?.into_pointer_value();
+                        // TODO: Check for null ptr return from vec_get_ptr
+
+                        // Cast i8* to typed pointer (e.g., i64*, float*)
+                        let elem_ptr_typed = match self.builder.build_pointer_cast(
+                            elem_ptr_i8,
+                            self.context.ptr_type(AddressSpace::default()),
+                            "elem_ptr_typed"
+                        ){
+                            Ok(val) => val,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during pointer cast: {}", e),
+                                    span,
+                                ))
+                            }
+                        }; // Cast to i8* first
+
+                        // Generate store to write RHS value into the element slot
+                        self.builder.build_store(elem_ptr_typed, compiled_rhs_value);
+
+                        // Assignment expression returns the assigned value
+                        Ok(compiled_rhs_value)
+                    }
+                    // Invalid L-value (Parser should prevent, but error defensively)
+                    _ => Err(CodeGenError::InvalidType(
                         format!(
-                            "Type mismatch in assignment to '{}': variable is {:?}, value is {:?}",
-                            target,
-                            expected_llvm_type,
-                            compiled_value.get_type()
+                            "Invalid L-value for assignment: expected variable or index access, found {:?}",
+                            target.kind
                         ),
                         span,
-                    ));
-                }
-
-                // 5. Generate the store instruction
-                self.builder.build_store(var_info.ptr, compiled_value);
-
-                // 6. Assignment expression returns the assigned value
-                Ok(compiled_value)
-            }
+                    )),
+                } // End match target.kind
+            } // End Assignment case
 
             // --- If Expression (Branches are now Expressions) ---
             ExpressionKind::IfExpr {
