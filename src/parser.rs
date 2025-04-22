@@ -281,9 +281,14 @@ impl<'a> Parser<'a> {
             None // No initializer expression
         } else {
             // Parse expression, box it
-            Some(self.parse_expression(Precedence::Lowest)?)
+            match self.parse_statement() {
+                Ok(stmt) => Some(Box::new(stmt)), // Wrap in Box
+                Err(err) => {
+                    return Err(err); // Propagate error
+                }
+            }
         };
-        self.expect_and_consume_kind(TokenKind::Semicolon)?; // Consume first ';'
+        // self.expect_and_consume_kind(TokenKind::Semicolon)?; // Consume first ';'
 
         // 2. Parse Condition (Optional Expression before second ';')
         let condition = if self.current_token.kind == TokenKind::Semicolon {

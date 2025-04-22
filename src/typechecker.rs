@@ -398,7 +398,7 @@ impl TypeChecker {
                 // Check for needs proper scoping if init declares vars
                 self.symbol_table.enter_scope(); // Scope for initializer and loop
                 if let Some(init_expr) = initializer {
-                    self.check_expression(init_expr);
+                    self.check_statement(init_expr);
                 }
                 if let Some(cond_expr) = condition {
                     match self.check_expression(cond_expr) {
@@ -431,7 +431,7 @@ impl TypeChecker {
                 let signature = signature.unwrap();
 
                 self.symbol_table.enter_scope(); // Enter function scope
-                let original_return_type = self
+                self
                     .current_function_return_type
                     .replace(signature.return_type);
 

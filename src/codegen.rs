@@ -1755,7 +1755,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // 1. Compile Initializer (if present)
                 if let Some(init_expr) = initializer {
                     // Compile for side effects, ignore value
-                    let _ = self.compile_expression(init_expr)?;
+                    let _ = self.compile_statement(init_expr)?;
                 }
 
                 // 2. Create Basic Blocks

@@ -247,7 +247,7 @@ pub enum StatementKind {
         body: Program,
     },
     ForStmt {
-        initializer: Option<Expression>,
+        initializer: Option<Box<Statement>>,
         condition: Option<Expression>,
         increment: Option<Expression>,
         body: Program,
