@@ -8,8 +8,8 @@ pub mod types;
 pub mod utils;
 mod symbol_table;
 pub mod typechecker;
-mod location;
-
+pub mod location;
+mod tests;
 #[no_mangle]
 pub extern "C" fn print_f64_wrapper(value: f64) {
     println!("{:.6}", value);

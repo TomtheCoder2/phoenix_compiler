@@ -35,7 +35,7 @@ fn main() {
     println!("Input:\n{}", input);
 
     // --- Parsing ---
-    let lexer = Lexer::new(input);
+    let lexer = Lexer::new("main.rs".to_string(), input);
     let mut parser = Parser::new(lexer);
     let program = match parser.parse_program() {
         Ok(prog) => {

@@ -1,34 +1,49 @@
-// src/token.rs
+// src/TokenKind.rs
 
+use crate::location::Location;
 use crate::types::Type;
 // Import our new Type enum
 
+// The actual token data structure passed around
+#[derive(Debug, Clone)] // Remove PartialEq auto-derive for now
+pub struct Token {
+    pub kind: TokenKind,
+    pub loc: Location,
+}
+
+// Custom PartialEq to ignore location for comparisons in parser etc.
+impl PartialEq for Token {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind // Compare only the kind
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
-pub enum Token {
-    // Special Tokens
+pub enum TokenKind {
+    // Special TokenKinds
     Illegal(char),
     Eof,
 
     // Literals
-    FloatNum(f64),     // Renamed from Number
-    IntNum(i64),       // Added for integers
-    BoolLiteral(bool), // Added for true/false
+    FloatNum(f64),         // Renamed from Number
+    IntNum(i64),           // Added for integers
+    BoolLiteral(bool),     // Added for true/false
     StringLiteral(String), // Added for string literals
 
     // Operators
-    Plus,  // '+'
-    Minus, // '-'
-    Star,  // '*'
-    Slash, // '/'
+    Plus,   // '+'
+    Minus,  // '-'
+    Star,   // '*'
+    Slash,  // '/'
     Assign, // '='
 
     // Comparison Operators (Added)
-    LessThan,    // '<'
-    GreaterThan, // '>'
-    Equal,       // '=='
-    NotEqual,    // '!='
-    LessEqual,   // '<='
-    GreaterEqual,// '>='
+    LessThan,     // '<'
+    GreaterThan,  // '>'
+    Equal,        // '=='
+    NotEqual,     // '!='
+    LessEqual,    // '<='
+    GreaterEqual, // '>='
 
     // Logical Operators (Add later?)
     Bang, // '!' (Negation)
@@ -45,15 +60,15 @@ pub enum Token {
     Colon,     // ':' //  for type annotations (e.g., let x: int)
 
     // Keywords
-    Let, // 'let'
-    Var, // 'var' (mutable binding) 
-    Fun, // 'fun'
-    True, // 'true' 
-    False, // 'false' 
-    If, // 'if'
-    Else, // 'else'
-    While, // 'while' 
-    For, // 'for'
+    Let,    // 'let'
+    Var,    // 'var' (mutable binding)
+    Fun,    // 'fun'
+    True,   // 'true'
+    False,  // 'false'
+    If,     // 'if'
+    Else,   // 'else'
+    While,  // 'while'
+    For,    // 'for'
     Return, // 'return'
     // Type Keywords (optional, could use identifiers)
     // TypeInt, // 'int'
@@ -74,3 +89,5 @@ pub fn keyword_to_type(ident: &str) -> Option<Type> {
         _ => None,
     }
 }
+
+

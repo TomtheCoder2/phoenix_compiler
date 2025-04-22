@@ -1,8 +1,10 @@
 // src/codegen.rs
 
 use crate::ast::{
-    BinaryOperator, ComparisonOperator, Expression, Program, Statement, UnaryOperator,
+    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program, Statement,
+    StatementKind, UnaryOperator,
 };
+use crate::location::Span;
 // Added BasicValueEnum
 use crate::types::Type;
 use inkwell::builder::Builder;
@@ -18,6 +20,7 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 use std::collections::HashMap;
+use std::default::Default;
 use std::ffi::CString;
 use std::fmt;
 use std::path::Path;
@@ -25,67 +28,85 @@ use std::path::Path;
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
 pub enum CodeGenError {
-    InvalidAstNode(String),
-    LlvmError(String),
+    InvalidAstNode(String, Span),
+    LlvmError(String, Span),
     // UnknownOperator(BinaryOperator), // Covered by expression compilation
-    UndefinedVariable(String),
-    UndefinedFunction(String),    // Added
-    FunctionRedefinition(String), // Added
+    UndefinedVariable(String, Span),
+    UndefinedFunction(String, Span),    // Added
+    FunctionRedefinition(String, Span), // Added
     IncorrectArgumentCount {
         // Added
         func_name: String,
         expected: usize,
         found: usize,
+        span: Span,
     },
-    PrintArgError(String),
-    InvalidType(String), // For type mismatches or unsupported operations
-    InvalidUnaryOperation(String), // For later
-    InvalidBinaryOperation(String), // For type mismatches
-    MissingTypeInfo(String), // If type info is needed but missing
-    AssignmentToImmutable(String),
-    PrintStrArgError(String),
+    PrintArgError(String, Span),
+    InvalidType(String, Span), // For type mismatches or unsupported operations
+    InvalidUnaryOperation(String, Span), // For later
+    InvalidBinaryOperation(String, Span), // For type mismatches
+    MissingTypeInfo(String, Span), // If type info is needed but missing
+    AssignmentToImmutable(String, Span),
+    PrintStrArgError(String, Span),
 }
 impl fmt::Display for CodeGenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CodeGenError::InvalidAstNode(msg) => write!(f, "Invalid AST Node: {}", msg),
-            CodeGenError::LlvmError(msg) => write!(f, "LLVM Error: {}", msg),
-            CodeGenError::UndefinedVariable(name) => write!(f, "Undefined variable: {}", name),
-            CodeGenError::UndefinedFunction(name) => {
-                write!(f, "Codegen Error: Undefined function '{}'", name)
+            CodeGenError::InvalidAstNode(msg, span) => {
+                write!(f, "{}: Invalid AST Node: {}", span, msg)
             }
-            CodeGenError::FunctionRedefinition(name) => {
-                write!(f, "Codegen Error: Function '{}' redefined", name)
+            CodeGenError::LlvmError(msg, span) => write!(f, "{}: LLVM Error: {}", span, msg),
+            CodeGenError::UndefinedVariable(name, span) => {
+                write!(f, "{}: Undefined variable: {}", span, name)
+            }
+            CodeGenError::UndefinedFunction(name, span) => {
+                write!(f, "{}: Codegen Error: Undefined function '{}'", span, name)
+            }
+            CodeGenError::FunctionRedefinition(name, span) => {
+                write!(f, "{}: Codegen Error: Function '{}' redefined", span, name)
             }
             CodeGenError::IncorrectArgumentCount {
                 func_name,
                 expected,
                 found,
+                span,
             } => write!(
                 f,
-                "Codegen Error: Call to function '{}' expected {} arguments, found {}",
-                func_name, expected, found
+                "{}: Codegen Error: Call to function '{}' expected {} arguments, found {}",
+                span, func_name, expected, found
             ),
-            CodeGenError::PrintArgError(msg) => write!(f, "Built-in 'print' Error: {}", msg),
-            CodeGenError::InvalidType(msg) => write!(f, "Codegen Type Error: {}", msg),
-            CodeGenError::InvalidBinaryOperation(msg) => {
-                write!(f, "Codegen Binary Op Error: {}", msg)
+            CodeGenError::PrintArgError(msg, span) => {
+                write!(f, "{}: Built-in 'print' Error: {}", span, msg)
             }
-            CodeGenError::MissingTypeInfo(name) => {
-                write!(f, "Codegen Error: Missing type info for '{}'", name)
+            CodeGenError::InvalidType(msg, span) => {
+                write!(f, "{}: Codegen Type Error: {}", span, msg)
             }
-            CodeGenError::InvalidUnaryOperation(msg) => {
-                write!(f, "Codegen Unary Op Error: {}", msg)
+            CodeGenError::InvalidBinaryOperation(msg, span) => {
+                write!(f, "{}: Codegen Binary Op Error: {}", span, msg)
             }
-            CodeGenError::AssignmentToImmutable(msg) => {
+            CodeGenError::MissingTypeInfo(name, span) => {
                 write!(
                     f,
-                    "Codegen Error: Cannot assign to immutable variable: {}",
-                    msg
+                    "{}: Codegen Error: Missing type info for '{}'",
+                    span, name
                 )
             }
-            CodeGenError::PrintStrArgError(msg) => {
-                write!(f, "Codegen Error: print_str argument error: {}", msg)
+            CodeGenError::InvalidUnaryOperation(msg, span) => {
+                write!(f, "{}: Codegen Unary Op Error: {}", span, msg)
+            }
+            CodeGenError::AssignmentToImmutable(msg, span) => {
+                write!(
+                    f,
+                    "{}: Codegen Error: Cannot assign to immutable variable: {}",
+                    span, msg
+                )
+            }
+            CodeGenError::PrintStrArgError(msg, span) => {
+                write!(
+                    f,
+                    "{}: Codegen Error: print_str argument error: {}",
+                    span, msg
+                )
             }
         }
     }
@@ -174,34 +195,41 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     // Helper to get the type of an expression - NEEDS TYPE CHECKING PHASE ideally
     // For now, we infer based on structure, which is LIMITED and UNSAFE.
     fn infer_expression_type(&self, expr: &Expression) -> Result<Type, CodeGenError> {
-        match expr {
-            Expression::FloatLiteral(_) => Ok(Type::Float),
-            Expression::IntLiteral(_) => Ok(Type::Int),
-            Expression::BoolLiteral(_) => Ok(Type::Bool),
-            Expression::Variable(name) => {
+        let span = expr.span.clone();
+        match &expr.kind {
+            ExpressionKind::FloatLiteral(_) => Ok(Type::Float),
+            ExpressionKind::IntLiteral(_) => Ok(Type::Int),
+            ExpressionKind::BoolLiteral(_) => Ok(Type::Bool),
+            ExpressionKind::Variable(name) => {
                 self.variables
                     .get(name)
                     .map(|info| info.ty) // Get type from symbol table
-                    .ok_or_else(|| CodeGenError::MissingTypeInfo(name.clone())) // Error if var used before defined (or type missing)
+                    .ok_or_else(|| CodeGenError::MissingTypeInfo(name.clone(), span))
+                // Error if var used before defined (or type missing)
             }
-            Expression::BinaryOp { op, left, right } => {
+            ExpressionKind::BinaryOp { op, left, right } => {
                 // Very basic inference: assume result type matches operands
                 // THIS IS WRONG: needs proper type checking based on operator rules!
                 // E.g., int + int -> int, float + float -> float
                 self.infer_expression_type(left)
             }
-            Expression::ComparisonOp { .. } => {
+            ExpressionKind::ComparisonOp { .. } => {
                 // Comparisons always return boolean
                 Ok(Type::Bool)
             }
-            Expression::FunctionCall { name, .. } => {
+            ExpressionKind::FunctionCall { name, .. } => {
                 // Look up function's declared return type
                 self.functions
                     .get(name)
                     .map(|(_, ret_ty, _)| *ret_ty) // Get return type from map
-                    .ok_or_else(|| CodeGenError::MissingTypeInfo(format!("function {}", name)))
+                    .ok_or_else(|| {
+                        CodeGenError::MissingTypeInfo(format!("function {}", name), span)
+                    })
             }
-            _ => Err(CodeGenError::LlvmError("unexpected branch".to_string())),
+            _ => Err(CodeGenError::LlvmError(
+                "unexpected branch".to_string(),
+                span,
+            )),
         }
     }
 
@@ -249,11 +277,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     /// Compiles a single Expression node (used by statements)
     /// Returns a FloatValue representing the result of the expression.
     fn compile_expression(&mut self, expr: &Expression) -> CompileExprResult<'ctx> {
-        match expr {
-            Expression::FloatLiteral(value) => {
+        let span = expr.span.clone();
+        match &expr.kind {
+            ExpressionKind::FloatLiteral(value) => {
                 Ok(self.context.f64_type().const_float(*value).into())
             }
-            Expression::IntLiteral(value) => {
+            ExpressionKind::IntLiteral(value) => {
                 // Assuming i64 for now
                 Ok(self
                     .context
@@ -261,7 +290,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     .const_int(*value as u64, true)
                     .into()) // true=signed
             }
-            Expression::BoolLiteral(value) => {
+            ExpressionKind::BoolLiteral(value) => {
                 Ok(self
                     .context
                     .bool_type()
@@ -269,21 +298,23 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     .into()) // false=unsigned
             }
 
-            Expression::Variable(name) => {
+            ExpressionKind::Variable(name) => {
                 match self.variables.get(name) {
                     Some(info) => {
                         let llvm_type = info.ty.to_llvm_basic_type(self.context);
                         let loaded_val = self
                             .builder
                             .build_load(llvm_type, info.ptr, name)
-                            .map_err(|e| CodeGenError::LlvmError(format!("Load failed: {}", e)))?;
+                            .map_err(|e| {
+                                CodeGenError::LlvmError(format!("Load failed: {}", e), span)
+                            })?;
                         Ok(loaded_val) // Returns BasicValueEnum
                     }
-                    None => Err(CodeGenError::UndefinedVariable(name.clone())),
+                    None => Err(CodeGenError::UndefinedVariable(name.clone(), span)),
                 }
             }
 
-            Expression::StringLiteral(value) => {
+            ExpressionKind::StringLiteral(value) => {
                 // 1. Create a global constant for the string literal's value
                 //    Use a unique name based on value? Or let LLVM handle duplicates?
                 //    Let's use a simple name for now. Need a better naming scheme later.
@@ -303,10 +334,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 } {
                     Ok(val) => val,
                     Err(e) => {
-                        return Err(CodeGenError::LlvmError(format!(
-                            "LLVM error during string pointer generation: {}",
-                            e
-                        )))
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error during string pointer generation: {}", e),
+                            span,
+                        ))
                     }
                 };
 
@@ -315,7 +346,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             }
 
             // Arithmetic Operations (Example: requires operands to be the same type for now)
-            Expression::BinaryOp { op, left, right } => {
+            ExpressionKind::BinaryOp { op, left, right } => {
                 let lhs = self.compile_expression(left)?;
                 let rhs = self.compile_expression(right)?;
 
@@ -333,7 +364,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 return Err(CodeGenError::LlvmError(format!(
                                     "LLVM error during integer operation: {}",
                                     e
-                                )))
+                                ), span))
                             }
                         };
                         Ok(result.into())
@@ -350,19 +381,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 return Err(CodeGenError::LlvmError(format!(
                                     "LLVM error during float operation: {}",
                                     e
-                                )))
+                                ), span))
                             }
                         };
                         Ok(result.into())
                     }
                     _ => Err(CodeGenError::InvalidBinaryOperation(
                         format!("Type mismatch or unsupported types for operator {:?} (lhs: {:?}, rhs: {:?})", op, lhs.get_type(), rhs.get_type())
-                    ))
+                        , span))
                 }
             }
 
             // Comparison Operations (Result is always Bool i1)
-            Expression::ComparisonOp { op, left, right } => {
+            ExpressionKind::ComparisonOp { op, left, right } => {
                 let lhs = self.compile_expression(left)?;
                 let rhs = self.compile_expression(right)?;
 
@@ -410,34 +441,37 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 "icmp_bool_ne",
                             ),
                             _ => {
-                                return Err(CodeGenError::InvalidBinaryOperation(format!(
-                                    "Unsupported comparison {:?} for booleans",
-                                    op
-                                )))
+                                return Err(CodeGenError::InvalidBinaryOperation(
+                                    format!("Unsupported comparison {:?} for booleans", op),
+                                    span,
+                                ))
                             }
                         }
                     }
                     _ => {
-                        return Err(CodeGenError::InvalidBinaryOperation(format!(
-                            "Type mismatch for comparison operator {:?} (lhs: {:?}, rhs: {:?})",
-                            op,
-                            lhs.get_type(),
-                            rhs.get_type()
-                        )))
+                        return Err(CodeGenError::InvalidBinaryOperation(
+                            format!(
+                                "Type mismatch for comparison operator {:?} (lhs: {:?}, rhs: {:?})",
+                                op,
+                                lhs.get_type(),
+                                rhs.get_type()
+                            ),
+                            span,
+                        ))
                     }
                 } {
                     Ok(val) => val,
                     Err(e) => {
-                        return Err(CodeGenError::LlvmError(format!(
-                            "LLVM error during comparison operation: {}",
-                            e
-                        )))
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error during comparison operation: {}", e),
+                            span,
+                        ))
                     }
                 };
                 Ok(predicate.into()) // Comparison result is IntValue (i1)
             }
             // --- Unary Operation ---
-            Expression::UnaryOp { op, operand } => {
+            ExpressionKind::UnaryOp { op, operand } => {
                 let compiled_operand = self.compile_expression(operand)?;
 
                 match op {
@@ -449,10 +483,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 Ok((match self.builder.build_int_neg(iv, "ineg_tmp") {
                                     Ok(val) => val,
                                     Err(e) => {
-                                        return Err(CodeGenError::LlvmError(format!(
-                                            "LLVM error during integer negation: {}",
-                                            e
-                                        )))
+                                        return Err(CodeGenError::LlvmError(
+                                            format!("LLVM error during integer negation: {}", e),
+                                            span,
+                                        ))
                                     }
                                 })
                                 .into())
@@ -461,18 +495,21 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 Ok((match self.builder.build_float_neg(fv, "fneg_tmp") {
                                     Ok(val) => val,
                                     Err(e) => {
-                                        return Err(CodeGenError::LlvmError(format!(
-                                            "LLVM error during float negation: {}",
-                                            e
-                                        )))
+                                        return Err(CodeGenError::LlvmError(
+                                            format!("LLVM error during float negation: {}", e),
+                                            span,
+                                        ))
                                     }
                                 })
                                 .into())
                             }
-                            _ => Err(CodeGenError::InvalidUnaryOperation(format!(
-                                "Cannot apply arithmetic negate '-' to type {:?}",
-                                compiled_operand.get_type()
-                            ))),
+                            _ => Err(CodeGenError::InvalidUnaryOperation(
+                                format!(
+                                    "Cannot apply arithmetic negate '-' to type {:?}",
+                                    compiled_operand.get_type()
+                                ),
+                                span,
+                            )),
                         }
                     }
                     UnaryOperator::Not => {
@@ -487,24 +524,27 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 Ok((match self.builder.build_xor(iv, true_val, "not_tmp") {
                                     Ok(val) => val,
                                     Err(e) => {
-                                        return Err(CodeGenError::LlvmError(format!(
-                                            "LLVM error during boolean negation: {}",
-                                            e
-                                        )))
+                                        return Err(CodeGenError::LlvmError(
+                                            format!("LLVM error during boolean negation: {}", e),
+                                            span,
+                                        ))
                                     }
                                 })
                                 .into())
                             }
-                            _ => Err(CodeGenError::InvalidUnaryOperation(format!(
-                                "Cannot apply logical not '!' to type {:?}",
-                                compiled_operand.get_type()
-                            ))),
+                            _ => Err(CodeGenError::InvalidUnaryOperation(
+                                format!(
+                                    "Cannot apply logical not '!' to type {:?}",
+                                    compiled_operand.get_type()
+                                ),
+                                span,
+                            )),
                         }
                     }
                 } // End match op
             }
             // --- Handle Function Calls ---
-            Expression::FunctionCall { name, args } => {
+            ExpressionKind::FunctionCall { name, args } => {
                 // --- >> SPECIAL CASE: Built-in print function << ---
                 if name == "print"
                     || name == "print_int"
@@ -518,6 +558,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             func_name: name.to_string(),
                             expected: 1,
                             found: args.len(),
+                            span,
                         });
                     }
 
@@ -531,10 +572,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         match arg_value {
                             BasicValueEnum::IntValue(_) => {}
                             _ => {
-                                return Err(CodeGenError::PrintArgError(format!(
-                                    "print_int expects an integer argument, found {:?}",
-                                    arg_value.get_type()
-                                )))
+                                return Err(CodeGenError::PrintArgError(
+                                    format!(
+                                        "print_int expects an integer argument, found {:?}",
+                                        arg_value.get_type()
+                                    ),
+                                    span,
+                                ))
                             }
                         }
                     } else if name == "print_str" {
@@ -544,10 +588,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                     == self.context.i8_type().ptr_type(AddressSpace::default()) => {
                             }
                             _ => {
-                                return Err(CodeGenError::PrintStrArgError(format!(
+                                return Err(CodeGenError::PrintStrArgError(
+                                    format!(
                                 "Argument must be a string literal (evaluating to i8*), found {:?}",
                                 arg_value.get_type()
-                            )))
+                            ),
+                                    span,
+                                ))
                             }
                         }
                     }
@@ -579,12 +626,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             } else {
                                 return Err(CodeGenError::PrintArgError(
                                     "Cannot print raw pointers directly".to_string(),
+                                    span,
                                 ));
                             }
                         }
                         _ => {
                             return Err(CodeGenError::PrintArgError(
                                 "Unsupported type for print".to_string(),
+                                span,
                             ));
                         }
                     }
@@ -604,7 +653,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     let (param_types, return_type, func_val) = self
                         .functions
                         .get(name)
-                        .ok_or_else(|| CodeGenError::UndefinedFunction(name.clone()))?
+                        .ok_or_else(|| CodeGenError::UndefinedFunction(name.clone(), span.clone()))?
                         .clone();
 
                     if args.len() != param_types.len() {
@@ -612,6 +661,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             func_name: name.clone(),
                             expected: param_types.len(),
                             found: args.len(),
+                            span,
                         });
                     }
 
@@ -627,7 +677,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             return Err(CodeGenError::InvalidType(format!(
                                 "Argument {} type mismatch for function '{}': expected {:?}, found {:?}",
                                 i, name, expected_llvm_type, arg_val.get_type()
-                            )));
+                            ), span));
                         }
                         compiled_args.push(arg_val.into());
                     }
@@ -636,10 +686,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         match self.builder.build_call(func_val, &compiled_args, "calltmp") {
                             Ok(val) => val,
                             Err(e) => {
-                                return Err(CodeGenError::LlvmError(format!(
-                                    "LLVM error during function call: {}",
-                                    e
-                                )))
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during function call: {}", e),
+                                    span,
+                                ))
                             }
                         };
 
@@ -658,17 +708,20 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 Some(ret_val) if ret_val.get_type() == expected_llvm_ret_type => {
                                     Ok(ret_val)
                                 }
-                                _ => Err(CodeGenError::LlvmError(format!(
-                                    "Call to '{}' did not return expected type {:?}",
-                                    name, expected_llvm_ret_type
-                                ))),
+                                _ => Err(CodeGenError::LlvmError(
+                                    format!(
+                                        "Call to '{}' did not return expected type {:?}",
+                                        name, expected_llvm_ret_type
+                                    ),
+                                    span,
+                                )),
                             }
                         }
                     }
                 }
             } // End FunctionCall
             // --- Assignment ---
-            Expression::Assignment { target, value } => {
+            ExpressionKind::Assignment { target, value } => {
                 // 1. Compile the RHS value
                 let compiled_value = self.compile_expression(value)?;
 
@@ -676,23 +729,26 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let var_info = self
                     .variables
                     .get(target)
-                    .ok_or_else(|| CodeGenError::UndefinedVariable(target.clone()))?;
+                    .ok_or_else(|| CodeGenError::UndefinedVariable(target.clone(), span.clone()))?;
 
                 // 3. Check mutability
                 if !var_info.is_mutable {
-                    return Err(CodeGenError::AssignmentToImmutable(target.clone()));
+                    return Err(CodeGenError::AssignmentToImmutable(target.clone(), span));
                 }
 
                 // 4. Check Type Match (Basic - needs proper type checking/conversion)
                 let expected_llvm_type = var_info.ty.to_llvm_basic_type(self.context);
                 if compiled_value.get_type() != expected_llvm_type {
                     // TODO: Implement type conversion or error properly
-                    return Err(CodeGenError::InvalidType(format!(
-                        "Type mismatch in assignment to '{}': variable is {:?}, value is {:?}",
-                        target,
-                        expected_llvm_type,
-                        compiled_value.get_type()
-                    )));
+                    return Err(CodeGenError::InvalidType(
+                        format!(
+                            "Type mismatch in assignment to '{}': variable is {:?}, value is {:?}",
+                            target,
+                            expected_llvm_type,
+                            compiled_value.get_type()
+                        ),
+                        span,
+                    ));
                 }
 
                 // 5. Generate the store instruction
@@ -703,7 +759,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             }
 
             // --- If Expression (Branches are now Expressions) ---
-            Expression::IfExpr {
+            ExpressionKind::IfExpr {
                 condition,
                 then_branch,
                 else_branch,
@@ -713,10 +769,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let bool_cond = match cond_val {
                     BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => iv,
                     _ => {
-                        return Err(CodeGenError::InvalidType(format!(
-                            "If condition must be boolean (i1), found {:?}",
-                            cond_val.get_type()
-                        )))
+                        return Err(CodeGenError::InvalidType(
+                            format!(
+                                "If condition must be boolean (i1), found {:?}",
+                                cond_val.get_type()
+                            ),
+                            span,
+                        ))
                     }
                 };
 
@@ -755,20 +814,23 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // Merge Block and PHI Node
                 self.builder.position_at_end(merge_bb);
                 if then_val.get_type() != else_val.get_type() {
-                    return Err(CodeGenError::InvalidType(format!(
-                        "If branches must have the same type: then {:?}, else {:?}",
-                        then_val.get_type(),
-                        else_val.get_type()
-                    )));
+                    return Err(CodeGenError::InvalidType(
+                        format!(
+                            "If branches must have the same type: then {:?}, else {:?}",
+                            then_val.get_type(),
+                            else_val.get_type()
+                        ),
+                        span,
+                    ));
                 }
                 let phi_type = then_val.get_type();
                 let phi_node = match self.builder.build_phi(phi_type, "ifexpr_tmp") {
                     Ok(val) => val,
                     Err(e) => {
-                        return Err(CodeGenError::LlvmError(format!(
-                            "LLVM error creating PHI node: {}",
-                            e
-                        )))
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error creating PHI node: {}", e),
+                            span,
+                        ))
                     }
                 };
                 phi_node.add_incoming(&[(&then_val, then_end_bb), (&else_val, else_end_bb)]);
@@ -777,7 +839,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } // End IfExpr case
 
             // --- Block Expression ---
-            Expression::Block {
+            ExpressionKind::Block {
                 statements,
                 final_expression,
             } => {
@@ -946,10 +1008,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             )
         }
         .map_err(|e| {
-            CodeGenError::LlvmError(format!(
-                "LLVM error during newline pointer generation: {}",
-                e
-            ))
+            CodeGenError::LlvmError(
+                format!("LLVM error during newline pointer generation: {}", e),
+                Span::default(),
+            )
         })?;
 
         // Call print_str with the newline
@@ -974,8 +1036,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     /// Compiles a single Statement node. Now runs FPM on function definitions.
     // --- Compile Statement (handles types) ---
     fn compile_statement(&mut self, stmt: &Statement) -> CompileStmtResult<'ctx> {
-        match stmt {
-            Statement::LetBinding {
+        let span = stmt.span.clone();
+        match &stmt.kind {
+            StatementKind::LetBinding {
                 name,
                 type_ann,
                 value,
@@ -986,7 +1049,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             }
 
             // --- Return Statement ---
-            Statement::ReturnStmt { value } => {
+            StatementKind::ReturnStmt { value } => {
                 match value {
                     // Case 1: return <expr>;
                     Some(expr) => {
@@ -1013,7 +1076,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // The block terminator check in loops/if should handle this.
             } // End ReturnStmt
 
-            Statement::VarBinding {
+            StatementKind::VarBinding {
                 name,
                 type_ann,
                 value,
@@ -1025,14 +1088,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 self.compile_var_let_stmt(name, type_ann, compiled_value, true)
             }
 
-            Statement::ExpressionStmt(expr) => {
+            StatementKind::ExpressionStmt(expr) => {
                 // Compile the expression, result might be any basic type
                 let value = self.compile_expression(expr)?;
                 Ok((Some(value), false))
             }
 
             // --- While Statement ---
-            Statement::WhileStmt { condition, body } => {
+            StatementKind::WhileStmt { condition, body } => {
                 let current_func = self
                     .current_function
                     .expect("Cannot compile 'while' outside a function");
@@ -1055,10 +1118,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     // Verify condition is boolean (i1)
                     BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => iv,
                     _ => {
-                        return Err(CodeGenError::InvalidType(format!(
-                            "While condition must be boolean (i1), found {:?}",
-                            cond_val.get_type()
-                        )))
+                        return Err(CodeGenError::InvalidType(
+                            format!(
+                                "While condition must be boolean (i1), found {:?}",
+                                cond_val.get_type()
+                            ),
+                            span,
+                        ))
                     }
                 };
                 // Build conditional branch based on condition value
@@ -1082,7 +1148,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } // End WhileStmt
 
             // --- For Statement ---
-            Statement::ForStmt {
+            StatementKind::ForStmt {
                 initializer,
                 condition,
                 increment,
@@ -1126,10 +1192,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 iv
                             }
                             _ => {
-                                return Err(CodeGenError::InvalidType(format!(
-                                    "For loop condition must be boolean (i1), found {:?}",
-                                    cond_val.get_type()
-                                )))
+                                return Err(CodeGenError::InvalidType(
+                                    format!(
+                                        "For loop condition must be boolean (i1), found {:?}",
+                                        cond_val.get_type()
+                                    ),
+                                    span,
+                                ))
                             }
                         }
                     }
@@ -1178,7 +1247,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } // End ForStmt
 
             // --- If Statement (optional else, no return value/PHI needed) ---
-            Statement::IfStmt {
+            StatementKind::IfStmt {
                 condition,
                 then_branch,
                 else_branch,
@@ -1188,10 +1257,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let bool_cond = match cond_val {
                     BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => iv,
                     _ => {
-                        return Err(CodeGenError::InvalidType(format!(
-                            "If condition must be boolean (i1), found {:?}",
-                            cond_val.get_type()
-                        )))
+                        return Err(CodeGenError::InvalidType(
+                            format!(
+                                "If condition must be boolean (i1), found {:?}",
+                                cond_val.get_type()
+                            ),
+                            span,
+                        ))
                     }
                 };
                 let current_func = self
@@ -1227,7 +1299,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 Ok((None, false))
             }
 
-            Statement::FunctionDef {
+            StatementKind::FunctionDef {
                 name,
                 params,
                 return_type_ann,
@@ -1235,7 +1307,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } => {
                 if self.functions.contains_key(name) {
                     // Function already defined
-                    return Err(CodeGenError::FunctionRedefinition(name.clone()));
+                    return Err(CodeGenError::FunctionRedefinition(name.clone(), span));
                 }
 
                 // --- Determine Param and Return Types ---
@@ -1364,12 +1436,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     }
                     return Err(CodeGenError::LlvmError(
                         "Function verification failed".to_string(),
+                        span,
                     ));
                 }
                 self.fpm.run_on(&function);
                 if !function.verify(true) {
                     return Err(CodeGenError::LlvmError(
                         "Function verification failed after optimization".to_string(),
+                        span,
                     ));
                 }
 
@@ -1404,7 +1478,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     BasicValueEnum::FloatValue(_) => Type::Float,
                     _ => {
                         return Err(CodeGenError::InvalidType(
-                            "Cannot infer type for let binding".to_string(),
+                            format!(
+                                "Cannot infer type for let binding [internal] [{}:{}]",
+                                file!(),
+                                line!()
+                            ),
+                            Span::default(),
                         ))
                     }
                 }
@@ -1502,6 +1581,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // unsafe { main_function.delete(); } // No need to delete, just return Err
                 return Err(CodeGenError::LlvmError(
                     "Main function verification failed after optimization".to_string(),
+                    Span::default(), // Placeholder, should be the actual span of the main function
                 ));
             }
         } else {
@@ -1509,6 +1589,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             // unsafe { main_function.delete(); }
             return Err(CodeGenError::LlvmError(
                 "Main function verification failed before optimization".to_string(),
+                Span::default(), // Placeholder, should be the actual span of the main function
             ));
         }
 
@@ -1524,16 +1605,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
         // Initialize required targets (native is usually sufficient for host compilation)
         Target::initialize_native(&InitializationConfig::default()).map_err(|e| {
-            CodeGenError::LlvmError(format!("Failed to initialize native target: {}", e))
+            CodeGenError::LlvmError(
+                format!("Failed to initialize native target: {}", e),
+                Span::default(),
+            )
         })?;
         // Alternatively, initialize specific targets: Target::initialize_aarch64(&InitializationConfig::default());
 
         // --- Target Lookup ---
         let target = Target::from_triple(target_triple).map_err(|e| {
-            CodeGenError::LlvmError(format!(
-                "Failed to get target for triple '{}': {}",
-                target_triple, e
-            ))
+            CodeGenError::LlvmError(
+                format!("Failed to get target for triple '{}': {}", target_triple, e),
+                Span::default(),
+            )
         })?;
 
         // --- Create Target Machine ---
@@ -1554,10 +1638,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 code_model,
             )
             .ok_or_else(|| {
-                CodeGenError::LlvmError(format!(
-                    "Failed to create target machine for triple '{}'",
-                    target_triple
-                ))
+                CodeGenError::LlvmError(
+                    format!(
+                        "Failed to create target machine for triple '{}'",
+                        target_triple
+                    ),
+                    Span::default(),
+                )
             })?;
 
         // --- Emit Object File ---
@@ -1568,7 +1655,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 FileType::Object, // Specify we want an object file
                 output_path,
             )
-            .map_err(|e| CodeGenError::LlvmError(format!("Failed to write object file: {}", e)))?;
+            .map_err(|e| {
+                CodeGenError::LlvmError(
+                    format!("Failed to write object file: {}", e),
+                    Span::default(),
+                )
+            })?;
 
         Ok(())
     }
@@ -1577,6 +1669,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{def, defs};
     use inkwell::context::Context;
     use std::path::Path;
 
@@ -1588,8 +1681,8 @@ mod tests {
         let builder = context.create_builder();
         let mut compiler = Compiler::new(&context, &builder, &module);
 
-        let expr = Expression::FloatLiteral(5.43);
-        let result = compiler.compile_expression(&expr);
+        let expr = ExpressionKind::FloatLiteral(5.43);
+        let result = compiler.compile_expression(&def(expr));
 
         assert!(result.is_ok());
         assert_eq!(
@@ -1609,13 +1702,16 @@ mod tests {
         let builder = context.create_builder();
         let mut compiler = Compiler::new(&context, &builder, &module);
 
-        let expr = Expression::Variable("x".to_string());
+        let expr = Expression {
+            kind: ExpressionKind::Variable("x".to_string()),
+            span: Default::default(),
+        };
         let result = compiler.compile_expression(&expr);
 
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            CodeGenError::UndefinedVariable("x".to_string())
+            CodeGenError::UndefinedVariable("x".to_string(), Default::default())
         );
     }
 
@@ -1626,17 +1722,18 @@ mod tests {
         let builder = context.create_builder();
         let mut compiler = Compiler::new(&context, &builder, &module);
 
-        let expr = Expression::BinaryOp {
+        let expr = def(ExpressionKind::BinaryOp {
             op: BinaryOperator::Add,
-            left: Box::new(Expression::IntLiteral(5)),
-            right: Box::new(Expression::FloatLiteral(5.43)),
-        };
+            left: Box::new(def(ExpressionKind::IntLiteral(5))),
+            right: Box::new(def(ExpressionKind::FloatLiteral(5.43))),
+        });
+
         let result = compiler.compile_expression(&expr);
 
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            CodeGenError::InvalidBinaryOperation(_)
+            CodeGenError::InvalidBinaryOperation(_, ..)
         ));
     }
 
@@ -1666,7 +1763,10 @@ mod tests {
         let result = compiler.emit_object_file(output_path);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), CodeGenError::LlvmError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            CodeGenError::LlvmError(_, ..)
+        ));
     }
 
     #[test]
@@ -1684,26 +1784,29 @@ mod tests {
 
         let body = Program {
             statements: vec![
-                Statement::ExpressionStmt(Expression::BinaryOp {
-                    op: BinaryOperator::Add,
-                    left: Box::new(Expression::Variable("a".to_string())),
-                    right: Box::new(Expression::Variable("b".to_string())),
+                defs(StatementKind::ExpressionStmt(def(
+                    ExpressionKind::BinaryOp {
+                        op: BinaryOperator::Add,
+                        left: Box::new(def(ExpressionKind::Variable("a".to_string()))),
+                        right: Box::new(def(ExpressionKind::Variable("b".to_string()))),
+                    },
+                ))),
+                defs(StatementKind::ReturnStmt {
+                    value: Some(def(*Box::new(ExpressionKind::Variable("a".to_string())))),
                 }),
-                Statement::ReturnStmt {
-                    value: Some(*Box::new(Expression::Variable("a".to_string()))),
-                },
             ],
+            span: Default::default(),
         };
 
-        let func_def = Statement::FunctionDef {
+        let func_def = StatementKind::FunctionDef {
             name: "add".to_string(),
             params,
             return_type_ann: Some(Type::Int),
-            body: Box::new(body),
+            body,
         };
 
         // Compile the function definition
-        let result = compiler.compile_statement(&func_def);
+        let result = compiler.compile_statement(&defs(func_def));
 
         // Verify compilation succeeded
         assert!(result.is_ok());
@@ -1727,20 +1830,21 @@ mod tests {
         let mut compiler = Compiler::new(&context, &builder, &module);
         // Create a function: fun returns_int(): int { return 10; }
         let body = Program {
-            statements: vec![Statement::ReturnStmt {
-                value: Some(*Box::new(Expression::IntLiteral(10))),
-            }],
+            statements: vec![defs(StatementKind::ReturnStmt {
+                value: Some(def(*Box::new(ExpressionKind::IntLiteral(10)))),
+            })],
+            span: Default::default(),
         };
 
-        let func_def = Statement::FunctionDef {
+        let func_def = StatementKind::FunctionDef {
             name: "returns_int".to_string(),
             params: vec![],
             return_type_ann: Some(Type::Int),
-            body: Box::new(body),
+            body,
         };
 
         // Compile the function definition
-        let result = compiler.compile_statement(&func_def);
+        let result = compiler.compile_statement(&defs(func_def));
         assert!(result.is_ok());
 
         // Verify the function signature has the correct return type
@@ -1757,17 +1861,18 @@ mod tests {
 
         // Create a function: fun returns_float(): float { return 3.14; }
         let body = Program {
-            statements: vec![Statement::ReturnStmt {
-                value: Some(*Box::new(Expression::FloatLiteral(3.20))),
-            }],
+            statements: vec![defs(StatementKind::ReturnStmt {
+                value: Some(def(ExpressionKind::FloatLiteral(3.20))),
+            })],
+            span: Default::default(),
         };
 
-        let func_def = Statement::FunctionDef {
+        let func_def = defs(StatementKind::FunctionDef {
             name: "returns_float".to_string(),
             params: vec![],
             return_type_ann: Some(Type::Float),
-            body: Box::new(body),
-        };
+            body,
+        });
 
         // Compile the function definition
         let result = compiler.compile_statement(&func_def);
@@ -1787,17 +1892,18 @@ mod tests {
 
         // Create a function: fun returns_bool(): bool { return true; }
         let body = Program {
-            statements: vec![Statement::ReturnStmt {
-                value: Some(*Box::new(Expression::BoolLiteral(true))),
-            }],
+            statements: vec![defs(StatementKind::ReturnStmt {
+                value: Some(def(ExpressionKind::BoolLiteral(true))),
+            })],
+            span: Default::default(),
         };
 
-        let func_def = Statement::FunctionDef {
+        let func_def = defs(StatementKind::FunctionDef {
             name: "returns_bool".to_string(),
             params: vec![],
             return_type_ann: Some(Type::Bool),
-            body: Box::new(body),
-        };
+            body,
+        });
 
         // Compile the function definition
         let result = compiler.compile_statement(&func_def);
@@ -1817,15 +1923,16 @@ mod tests {
 
         // Create a function: fun returns_void(): void { return; }
         let body = Program {
-            statements: vec![Statement::ReturnStmt { value: None }],
+            statements: vec![defs(StatementKind::ReturnStmt { value: None })],
+            span: Default::default(),
         };
 
-        let func_def = Statement::FunctionDef {
+        let func_def = defs(StatementKind::FunctionDef {
             name: "returns_void".to_string(),
             params: vec![],
             return_type_ann: Some(Type::Void),
-            body: Box::new(body),
-        };
+            body,
+        });
 
         // Compile the function definition
         let result = compiler.compile_statement(&func_def);
@@ -1845,20 +1952,23 @@ mod tests {
 
         // Create a function: fun implicit_void(): void { print_str("Implicit void"); }
         let body = Program {
-            statements: vec![Statement::ExpressionStmt(Expression::FunctionCall {
-                name: "print_str".to_string(),
-                args: vec![*Box::new(Expression::StringLiteral(
-                    "Implicit void".to_string(),
-                ))],
-            })],
+            statements: vec![defs(StatementKind::ExpressionStmt(def(
+                ExpressionKind::FunctionCall {
+                    name: "print_str".to_string(),
+                    args: vec![def(ExpressionKind::StringLiteral(
+                        "Implicit void".to_string(),
+                    ))],
+                },
+            )))],
+            span: Default::default(),
         };
 
-        let func_def = Statement::FunctionDef {
+        let func_def = defs(StatementKind::FunctionDef {
             name: "implicit_void".to_string(),
             params: vec![],
             return_type_ann: Some(Type::Void),
-            body: Box::new(body),
-        };
+            body,
+        });
 
         // Compile the function definition
         let result = compiler.compile_statement(&func_def);

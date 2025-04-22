@@ -55,7 +55,7 @@ fn main() {
     }
 
     // Parse the input code
-    let lexer = Lexer::new(&input);
+    let lexer = Lexer::new(input_path.display().to_string(), &input);
     let mut parser = ToyParser::new(lexer);
     let program = match parser.parse_program() {
         Ok(prog) => {

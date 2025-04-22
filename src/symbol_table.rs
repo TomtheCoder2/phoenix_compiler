@@ -1,13 +1,15 @@
+use crate::location::Span;
 use crate::types::Type;
 use std::collections::HashMap;
 
 // Reusing VariableInfo from codegen for now, might become specific later
 // We need mutability info here too.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SymbolInfo {
     pub ty: Type,
     pub is_mutable: bool,
     // Add more later: definition location, etc.
+    pub def_span: Span, // Span where variable/param was defined
 }
 
 // Represents Function Signature Info for type checking
@@ -15,7 +17,7 @@ pub struct SymbolInfo {
 pub struct FunctionSignature {
     pub param_types: Vec<Type>,
     pub return_type: Type,
-    // Maybe store reference to definition AST node?
+    pub def_span: Span, // Maybe store reference to definition AST node?
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,13 +62,14 @@ impl SymbolTable {
 
     /// Define a variable in the *current* scope.
     /// Returns error if already defined in the current scope.
-    pub fn define_variable(&mut self, name: &str, info: SymbolInfo) -> Result<(), String> {
+    pub fn define_variable(&mut self, name: &str, info: SymbolInfo) -> Result<(), Span> {
         let current_scope = self
             .scopes
             .last_mut()
             .expect("Symbol table scope stack empty");
         if current_scope.variables.contains_key(name) {
-            Err(format!("Variable '{}' already defined in this scope", name))
+            let prev_span = &current_scope.variables.get(name).unwrap().def_span;
+            Err(prev_span.clone())
         } else {
             current_scope.variables.insert(name.to_string(), info);
             Ok(())
@@ -97,9 +100,10 @@ impl SymbolTable {
         &mut self,
         name: &str,
         signature: FunctionSignature,
-    ) -> Result<(), String> {
+    ) -> Result<(), Span> {
         if self.functions.contains_key(name) {
-            Err(format!("Function '{}' already defined", name))
+            let prev_span = &self.functions.get(name).unwrap().def_span;
+            Err(prev_span.clone())
         } else {
             self.functions.insert(name.to_string(), signature);
             Ok(())
@@ -122,6 +126,7 @@ mod tests {
         let var_info = SymbolInfo {
             ty: Type::Int,
             is_mutable: true,
+            def_span: Default::default(),
         };
         assert!(symbol_table.define_variable("x", var_info).is_ok());
         assert!(symbol_table.is_defined_in_current_scope("x"));
@@ -133,14 +138,12 @@ mod tests {
         let var_info = SymbolInfo {
             ty: Type::Int,
             is_mutable: true,
+            def_span: Default::default(),
         };
-        symbol_table.define_variable("x", var_info).unwrap();
+        symbol_table.define_variable("x", var_info.clone()).unwrap();
         let result = symbol_table.define_variable("x", var_info);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "Variable 'x' already defined in this scope"
-        );
+        assert_eq!(result.unwrap_err(), Default::default());
     }
 
     #[test]
@@ -149,8 +152,9 @@ mod tests {
         let var_info = SymbolInfo {
             ty: Type::Int,
             is_mutable: true,
+            def_span: Default::default(),
         };
-        symbol_table.define_variable("x", var_info).unwrap();
+        symbol_table.define_variable("x", var_info.clone()).unwrap();
         symbol_table.enter_scope();
         assert_eq!(symbol_table.lookup_variable("x"), Some(&var_info));
     }
@@ -173,8 +177,11 @@ mod tests {
         let func_sig = FunctionSignature {
             param_types: vec![Type::Int],
             return_type: Type::Void,
+            def_span: Default::default(),
         };
-        assert!(symbol_table.define_function("foo", func_sig.clone()).is_ok());
+        assert!(symbol_table
+            .define_function("foo", func_sig.clone())
+            .is_ok());
         assert_eq!(symbol_table.lookup_function("foo"), Some(&func_sig));
     }
 
@@ -184,10 +191,13 @@ mod tests {
         let func_sig = FunctionSignature {
             param_types: vec![Type::Int],
             return_type: Type::Void,
+            def_span: Default::default(),
         };
-        symbol_table.define_function("foo", func_sig.clone()).unwrap();
+        symbol_table
+            .define_function("foo", func_sig.clone())
+            .unwrap();
         let result = symbol_table.define_function("foo", func_sig);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Function 'foo' already defined");
+        assert_eq!(result.unwrap_err(), Default::default());
     }
 }

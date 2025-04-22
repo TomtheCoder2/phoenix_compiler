@@ -1,3 +1,4 @@
+use crate::location::Span;
 use crate::types::Type;
 
 // src/ast.rs
@@ -6,57 +7,94 @@ pub type NumberType = f64;
 // Program is still a list of statements
 #[derive(Debug, PartialEq, Clone)]
 pub struct Program {
-    pub statements: Vec<Statement>,
+    pub statements: Vec<Statement>, // Vec of Statement structs
+    pub span: Span,                 // Added span covering the whole program/block
+}
+
+// Wrapper Structs
+#[derive(Debug, PartialEq, Clone)]
+pub struct Statement {
+    pub kind: StatementKind,
+    pub span: Span, // Span covering the whole statement
+}
+
+pub fn defs(statement_kind: StatementKind) -> Statement {
+    Statement {
+        kind: statement_kind,
+        span: Span::default(),
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Statement {
+pub struct Expression {
+    pub kind: ExpressionKind,
+    pub span: Span, // Span covering the whole expression
+}
+
+/// Creates a new `Expression` from the given `ExpressionKind`.
+///
+/// # Arguments
+///
+/// * `expr` - The kind of expression to wrap in an `Expression` struct.
+///
+/// # Returns
+///
+/// An `Expression` struct containing the provided `ExpressionKind` and a default `Span`.
+///
+/// # Example
+///
+/// ```rust
+/// use toylang_compiler::ast::{ExpressionKind, def};
+/// use toylang_compiler::location::Span;
+///
+/// let expr_kind = ExpressionKind::IntLiteral(42);
+/// let expression = def(expr_kind);
+/// assert_eq!(expression.kind, ExpressionKind::IntLiteral(42));
+/// assert_eq!(expression.span, Span::default());
+/// ```
+pub fn def(expr: ExpressionKind) -> Expression {
+    Expression {
+        kind: expr,
+        span: Span::default(), // Default span for now
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum StatementKind {
+    // Renamed from Statement
     LetBinding {
         name: String,
-        // Optional type annotation (parsed but maybe not checked yet)
         type_ann: Option<Type>,
         value: Expression,
-    },
-    // Mutable binding
+    }, // Value is now Expression struct
     VarBinding {
         name: String,
         type_ann: Option<Type>,
         value: Expression,
     },
-    ExpressionStmt(Expression),
+    ExpressionStmt(Expression), // Holds Expression struct
     FunctionDef {
         name: String,
-        // Parameters now need optional type annotations
         params: Vec<(String, Option<Type>)>,
-        // Optional return type annotation
         return_type_ann: Option<Type>,
-        body: Box<Program>,
-    },
+        body: Program,
+    }, // Body is Program struct
     IfStmt {
-        condition: Expression,     // Condition is still an expression
-        then_branch: Box<Program>, // Block of statements
-        // Else branch is now optional
-        else_branch: Option<Box<Program>>,
-    },
+        condition: Expression,
+        then_branch: Program,
+        else_branch: Option<Program>,
+    }, // Holds Expression/Program structs
     WhileStmt {
-        condition: Expression, // Condition must evaluate to bool
-        body: Box<Program>,    // Block of statements to repeat
+        condition: Expression,
+        body: Program,
     },
-    // Added: for (init; cond; incr) { body }
     ForStmt {
-        // Initializer: Can be variable declaration or just expression(s)
-        // Let's allow only Expression for simplicity now (e.g. `i=0`, not `var i = 0`)
-        // Use Option<Expression> - maybe Boxed? Let's box it.
-        initializer: Option<Box<Expression>>,
-        // Condition: Evaluated before each iteration
-        condition: Option<Expression>, // No Box needed if direct Expression
-        // Increment: Evaluated after each iteration
-        increment: Option<Box<Expression>>,
-        // Body: Executed each iteration
-        body: Box<Program>,
+        initializer: Option<Expression>,
+        condition: Option<Expression>,
+        increment: Option<Expression>,
+        body: Program,
     },
     ReturnStmt {
-        // Value is optional to allow `return;` in void functions
         value: Option<Expression>,
     },
 }
@@ -68,55 +106,44 @@ pub enum UnaryOperator {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Expression {
-    // Literals
-    FloatLiteral(f64), // Renamed
+pub enum ExpressionKind {
+    // Renamed from Expression
+    FloatLiteral(f64),
     IntLiteral(i64),
     BoolLiteral(bool),
-    StringLiteral(String), 
-
-    // Variable & Call
+    StringLiteral(String),
     Variable(String),
-    // Assignment: target = value
     Assignment {
-        // Added
-        target: String, // Name of variable being assigned to
+        target: String,
         value: Box<Expression>,
+    }, // Holds Box<Expression> struct
+    IfExpr {
+        condition: Box<Expression>,
+        then_branch: Box<Expression>,
+        else_branch: Box<Expression>,
     },
+    Block {
+        statements: Vec<Statement>,
+        final_expression: Option<Box<Expression>>,
+    }, // Holds Vec<Statement>, Box<Expression> structs
     FunctionCall {
         name: String,
         args: Vec<Expression>,
     },
-
-    // Operators
     BinaryOp {
-        op: BinaryOperator, // Keep current arithmetic ops
+        op: BinaryOperator,
         left: Box<Expression>,
         right: Box<Expression>,
     },
     ComparisonOp {
-        // Added
         op: ComparisonOperator,
         left: Box<Expression>,
         right: Box<Expression>,
-    },
-    IfExpr {
-        // Renamed from If from previous chapter
-        condition: Box<Expression>,
-        then_branch: Box<Expression>, // Use Program for blocks
-        else_branch: Box<Expression>, // Mandatory
-    },
-    // Block used as an expression: { stmt; stmt; final_expr }
-    Block {
-        statements: Vec<Statement>,
-        // Optional final expression determines the block's value
-        final_expression: Option<Box<Expression>>,
     },
     UnaryOp {
         op: UnaryOperator,
         operand: Box<Expression>,
     },
-    // UnaryOp { op: UnaryOperator, operand: Box<Expression> }, // Add later for '!' etc.
 }
 
 // Separate enums for operator types

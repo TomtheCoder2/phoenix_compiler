@@ -1,178 +1,222 @@
 // src/lexer.rs
 
-use crate::token::Token;
+use crate::location::Location;
+use crate::token::{Token, TokenKind};
+use std::rc::Rc;
 
 pub struct Lexer<'a> {
-    input: std::str::Chars<'a>,
+    filename: Rc<String>,             // Store filename
+    input_chars: std::str::Chars<'a>, // Keep original iterator separate
+    input_bytes: &'a [u8], // Use byte slice for efficient peeking if needed? Maybe later.
+    // Position tracking
+    current_pos: usize, // Byte position in input_bytes/string
+    line: usize,        // Current line number (1-based)
+    col: usize,         // Current column number on line (1-based)
+    // Lookahead characters
     current_char: Option<char>,
-    // Add peek functionality - useful for identifiers vs keywords
     peek_char: Option<char>,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
+    pub fn new(filename: String, input: &'a str) -> Self {
+        let filename_rc = Rc::new(filename);
         let mut lexer = Lexer {
-            input: input.chars(),
+            filename: filename_rc,
+            input_chars: input.chars(),
+            input_bytes: input.as_bytes(), // Store bytes too? Maybe not needed yet.
+            current_pos: 0,
+            line: 1,
+            col: 1,
             current_char: None,
-            peek_char: None, // Initialize peek
+            peek_char: None,
         };
-        lexer.advance(); // Load current_char
-        lexer.advance(); // Load peek_char
+        lexer.read_char(); // Load current_char
+        lexer.read_char(); // Load peek_char
         lexer
     }
 
-    // Advance now updates both current and peek
-    fn advance(&mut self) {
+    // Reads next char and updates position *before* setting current/peek
+    fn read_char(&mut self) {
+        // Update position based on the *old* current_char before advancing
+        if let Some(ch) = self.current_char {
+            if ch == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                // Handle multi-byte UTF-8 chars correctly if needed.
+                // For now, assuming simple column increment is okay for ASCII / common chars.
+                self.col += 1;
+            }
+            self.current_pos += ch.len_utf8(); // Advance byte position
+        }
+
         self.current_char = self.peek_char;
-        self.peek_char = self.input.next();
+        // Get next char from iterator directly
+        self.peek_char = self.input_chars.next();
+    }
+
+    // Creates a location based on current lexer state
+    fn current_location(&self) -> Location {
+        Location {
+            filename: Rc::clone(&self.filename), // Clone the Rc
+            line: self.line,
+            col: self.col,
+        }
     }
 
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
 
-        let token = match self.current_char {
+        let start_loc = self.current_location(); // Location at START of token
+
+        let kind = match self.current_char {
             // Single char tokens
-            Some('+') => Token::Plus,
-            Some('-') => Token::Minus,
-            Some('*') => Token::Star,
+            Some('+') => TokenKind::Plus,
+            Some('-') => TokenKind::Minus,
+            Some('*') => TokenKind::Star,
             Some('/') => {
                 // Check for comment first
                 if self.peek_char == Some('/') {
-                    self.advance(); // Consume first /
-                    self.advance(); // Consume second /
-                                    // Consume until newline
+                    self.read_char(); // Consume first /
+                    self.read_char(); // Consume second /
+                                      // Consume until newline
                     while let Some(ch) = self.current_char {
                         if ch == '\n' {
                             break;
                         }
-                        self.advance();
+                        self.read_char();
                     }
                     // After loop, current_char is potentially '\n' or None.
-                    // We need the token *after* the comment.
+                    // We need the TokenKind *after* the comment.
                     return self.next_token(); // Recurse
                 } else {
-                    Token::Slash // Regular division
+                    TokenKind::Slash // Regular division
                 }
             }
-            Some('(') => Token::LParen,
-            Some(')') => Token::RParen,
-            Some(';') => Token::Semicolon,
-            Some(',') => Token::Comma,
-            Some('{') => Token::LBrace,
-            Some('}') => Token::RBrace,
-            Some(':') => Token::Colon,
+            Some('(') => TokenKind::LParen,
+            Some(')') => TokenKind::RParen,
+            Some(';') => TokenKind::Semicolon,
+            Some(',') => TokenKind::Comma,
+            Some('{') => TokenKind::LBrace,
+            Some('}') => TokenKind::RBrace,
+            Some(':') => TokenKind::Colon,
 
-            // Two-char tokens (check peek_char)
+            // Two-char TokenKinds (check peek_char)
             Some('=') => {
                 if self.peek_char == Some('=') {
-                    self.advance(); // Consume second '='
-                    Token::Equal // '=='
+                    self.read_char(); // Consume second '='
+                    TokenKind::Equal // '=='
                 } else {
-                    Token::Assign // '='
+                    TokenKind::Assign // '='
                 }
             }
             Some('!') => {
                 if self.peek_char == Some('=') {
-                    self.advance(); // Consume '='
-                    Token::NotEqual // '!='
+                    self.read_char(); // Consume '='
+                    TokenKind::NotEqual // '!='
                 } else {
-                    Token::Bang // Handle '!' later if needed for logical NOT
-                                // Token::Illegal('!') // For now, '!' alone is illegal
+                    TokenKind::Bang // Handle '!' later if needed for logical NOT
+                                    // TokenKind::Illegal('!') // For now, '!' alone is illegal
                 }
             }
             Some('<') => {
                 if self.peek_char == Some('=') {
-                    self.advance(); // Consume '='
-                    Token::LessEqual // '<='
+                    self.read_char(); // Consume '='
+                    TokenKind::LessEqual // '<='
                 } else {
-                    Token::LessThan // '<'
+                    TokenKind::LessThan // '<'
                 }
             }
             Some('>') => {
                 if self.peek_char == Some('=') {
-                    self.advance(); // Consume '='
-                    Token::GreaterEqual // '>='
+                    self.read_char(); // Consume '='
+                    TokenKind::GreaterEqual // '>='
                 } else {
-                    Token::GreaterThan // '>'
+                    TokenKind::GreaterThan // '>'
                 }
             }
             Some('"') => {
                 // Start of a string literal
-                return self.read_string(); // Delegate and return directly
+                return self.read_string(start_loc);
             }
 
             // Identifiers / Keywords / Bool Literals
             Some(ch) if is_identifier_start(ch) => {
-                let ident = self.read_identifier();
-                // Check keywords BEFORE returning identifier
-                return match ident.as_str() {
-                    "let" => Token::Let,
-                    "var" => Token::Var,
-                    "fun" => Token::Fun,
-                    "true" => Token::BoolLiteral(true),
-                    "false" => Token::BoolLiteral(false),
-                    "if" => Token::If,
-                    "else" => Token::Else,
-                    "while" => Token::While,
-                    "for" => Token::For,
-                    "return" => Token::Return,
-                    // Check type names? Optional.
-                    // type_name if keyword_to_type(type_name).is_some() => {
-                    //     Token::Type(keyword_to_type(type_name).unwrap()) // Or specific TypeInt etc.
-                    // }
-                    _ => Token::Identifier(ident),
+                let ident = self.read_identifier_string(); // Read only the string
+                                                           // Need to adjust read_identifier_string to *not* advance past end
+                let kind = match ident.as_str() {
+                    "let" => TokenKind::Let,
+                    "var" => TokenKind::Var,
+                    "fun" => TokenKind::Fun,
+                    "true" => TokenKind::BoolLiteral(true),
+                    "false" => TokenKind::BoolLiteral(false),
+                    "if" => TokenKind::If,
+                    "else" => TokenKind::Else,
+                    "while" => TokenKind::While,
+                    "for" => TokenKind::For,
+                    "return" => TokenKind::Return,
+                    _ => TokenKind::Identifier(ident), // Default to identifier
                 };
+                // Location should span the identifier
+                let current_loc = self.current_location(); // Location *after* identifier read
+                return Token {
+                    kind,
+                    loc: start_loc,
+                }; // Use start_loc for now
             }
 
             // Numbers (Integer or Float)
             Some(ch) if ch.is_digit(10) => {
-                // If it starts with a digit, it could be Int or Float
-                return self.read_number(); // read_number determines Int or Float
+                return self.read_number(start_loc); // Pass start loc
             }
             Some('.') => {
                 // Handle floats starting with '.'
                 if self.peek_char.map_or(false, |pc| pc.is_digit(10)) {
-                    return self.read_number(); // Let read_number handle ".5"
+                    return self.read_number(start_loc); // Let read_number handle ".5"
                 } else {
-                    Token::Illegal('.') // '.' alone is illegal
+                    TokenKind::Illegal('.') // '.' alone is illegal
                 }
             }
 
-            Some(ch) => Token::Illegal(ch),
-            None => Token::Eof,
+            None => TokenKind::Eof,
+            Some(illegal_ch) => TokenKind::Illegal(illegal_ch),
         };
 
-        self.advance(); // Move ahead for single-or-double-char tokens handled above
-        token
+        // Advance only if we didn't return early (e.g., from read_string/number/identifier)
+        // Need careful review of which branches call read_char
+        self.read_char(); // Advance past the processed char(s) for single/double tokens
+
+        Token {
+            kind,
+            loc: start_loc,
+        }
     }
 
     fn skip_whitespace(&mut self) {
         while let Some(ch) = self.current_char {
             if ch.is_whitespace() {
-                self.advance();
+                self.read_char();
             } else {
                 break;
             }
         }
     }
 
-    // Reads a sequence of letters/digits/_ starting from current_char
-    fn read_identifier(&mut self) -> String {
+    // read_identifier now just returns the string
+    fn read_identifier_string(&mut self) -> String {
         let mut identifier = String::new();
         while let Some(ch) = self.current_char {
             if is_identifier_continue(ch) {
                 identifier.push(ch);
-                self.advance(); // Consume identifier char
+                self.read_char(); // Consume identifier char
             } else {
-                break; // Stop if we hit a non-identifier character
+                break;
             }
         }
-        // We return the identifier string. The advance() call inside the loop
-        // means current_char is already positioned *after* the identifier.
         identifier
     }
 
-    fn read_number(&mut self) -> Token {
+    fn read_number(&mut self, start_loc: Location) -> Token {
         let mut number_str = String::new();
         let mut is_float = false;
 
@@ -194,47 +238,54 @@ impl<'a> Lexer<'a> {
                 // Not a digit or a valid '.'
                 break;
             }
-            self.advance(); // Consume digit or '.'
+            self.read_char(); // Consume digit or '.'
         }
 
         // Now, current_char is the char *after* the number literal
 
-        if is_float {
+        let kind = if is_float {
             match number_str.parse::<f64>() {
-                Ok(num) => Token::FloatNum(num),
+                Ok(num) => TokenKind::FloatNum(num),
                 // Should be rare if logic above is correct
-                Err(_) => Token::Illegal(number_str.chars().next().unwrap_or('?')),
+                Err(_) => TokenKind::Illegal(number_str.chars().next().unwrap_or('?')),
             }
         } else {
             // Didn't find '.', parse as i64
             match number_str.parse::<i64>() {
-                Ok(num) => Token::IntNum(num),
+                Ok(num) => TokenKind::IntNum(num),
                 // Could fail if number is too large for i64
                 Err(_) => {
                     // Maybe try parsing as f64 if i64 fails? Or report overflow?
                     // For now, treat as illegal if i64 parse fails.
                     // Could also introduce BigInt type later.
-                    Token::Illegal(number_str.chars().next().unwrap_or('?'))
+                    TokenKind::Illegal(number_str.chars().next().unwrap_or('?'))
                 }
             }
+        };
+        Token {
+            kind,
+            loc: start_loc,
         }
     }
 
     // Reads characters between double quotes, handling basic escapes
-    fn read_string(&mut self) -> Token {
+    fn read_string(&mut self, start_loc: Location) -> Token {
         let mut result = String::new();
-        self.advance(); // Consume the opening '"'
+        self.read_char(); // Consume the opening '"'
 
         while let Some(ch) = self.current_char {
             match ch {
                 '"' => {
                     // End of string
-                    self.advance(); // Consume the closing '"'
-                    return Token::StringLiteral(result);
+                    self.read_char(); // Consume closing '"'
+                    return Token {
+                        kind: TokenKind::StringLiteral(result),
+                        loc: start_loc,
+                    };
                 }
                 '\\' => {
                     // Escape sequence
-                    self.advance(); // Consume '\'
+                    self.read_char(); // Consume '\'
                     match self.current_char {
                         Some('n') => result.push('\n'),
                         Some('t') => result.push('\t'),
@@ -249,7 +300,10 @@ impl<'a> Lexer<'a> {
                         }
                         None => {
                             // EOF after backslash
-                            return Token::Illegal('\\'); // Or better error token
+                            return Token {
+                                kind: TokenKind::Illegal('\\'),
+                                loc: start_loc,
+                            };
                         }
                     }
                 }
@@ -258,11 +312,18 @@ impl<'a> Lexer<'a> {
                     result.push(ch);
                 }
             }
-            self.advance(); // Move to next character inside string
+            self.read_char(); // Move to next character inside string
         }
 
         // If we reach here, EOF was hit before closing quote
-        Token::Illegal('"') // Indicate unterminated string error
+
+        // Handle unterminated string
+        // Maybe return an error token or panic?
+        // For now, let's return an illegal token with the last char read.
+        Token {
+            kind: TokenKind::Illegal('"'),
+            loc: start_loc,
+        }
     }
 }
 
@@ -276,50 +337,49 @@ fn is_identifier_continue(ch: char) -> bool {
 }
 
 // --- Add tests for new tokens ---
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token::Token;
+    use crate::token::TokenKind;
 
     #[test]
     fn test_let_sequence() {
         let input = "let x = 10; let y = x + 5;";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Let,
-            Token::Identifier("x".to_string()),
-            Token::Assign,
-            Token::IntNum(10),
-            Token::Semicolon,
-            Token::Let,
-            Token::Identifier("y".to_string()),
-            Token::Assign,
-            Token::Identifier("x".to_string()),
-            Token::Plus,
-            Token::IntNum(5),
-            Token::Semicolon,
-            Token::Eof,
+            TokenKind::Let,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Assign,
+            TokenKind::IntNum(10),
+            TokenKind::Semicolon,
+            TokenKind::Let,
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Assign,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Plus,
+            TokenKind::IntNum(5),
+            TokenKind::Semicolon,
+            TokenKind::Eof,
         ];
 
         for expected_token in tokens {
             let actual_token = lexer.next_token();
-            assert_eq!(actual_token, expected_token);
+            assert_eq!(actual_token.kind, expected_token);
         }
     }
 
     #[test]
     fn test_float_parsing_dot_five() {
         let input = ".5 + 1";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::FloatNum(0.5),
-            Token::Plus,
-            Token::IntNum(1),
-            Token::Eof,
+            TokenKind::FloatNum(0.5),
+            TokenKind::Plus,
+            TokenKind::IntNum(1),
+            TokenKind::Eof,
         ];
         for expected_token in tokens {
             let actual_token = lexer.next_token();
-            assert_eq!(actual_token, expected_token);
+            assert_eq!(actual_token.kind, expected_token);
         }
     }
 
@@ -328,286 +388,293 @@ mod tests {
     //     // Assuming "5." is not a valid number on its own for now
     //     // (Some lexers might allow it, parsing would handle it)
     //     let input = "5.";
-    //     let mut lexer = Lexer::new(input);
+    //     let mut lexer = Lexer::new("test.txt".to_string(), input);
     //     // Our current parse will likely succeed `5.`.parse::<f64>() ok -> 5.0
     //     // If we wanted `5.` to be illegal, read_number needs adjustment
     //     // Let's keep it simple and assume `5.` parses as 5.0 for now.
-    //     assert_eq!(lexer.next_token(), Token::IntNum(5));
-    //     assert_eq!(lexer.next_token(), Token::Eof);
+    //     assert_eq!(lexer.next_token().kind, TokenKind::IntNum(5));
+    //     assert_eq!(lexer.next_token().kind, TokenKind::Eof);
     //
     //     // Test case for an clearly illegal sequence starting with '.'
     //     let input = " . ";
-    //     let mut lexer = Lexer::new(input);
-    //     assert_eq!(lexer.next_token(), Token::Illegal('.'));
+    //     let mut lexer = Lexer::new("test.txt".to_string(), input);
+    //     assert_eq!(lexer.next_token().kind, TokenKind::Illegal('.'));
     // }
     #[test]
     fn test_function_tokens() {
         let input = "fun add(a, b) { a + b; }";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Fun,
-            Token::Identifier("add".to_string()),
-            Token::LParen,
-            Token::Identifier("a".to_string()),
-            Token::Comma,
-            Token::Identifier("b".to_string()),
-            Token::RParen,
-            Token::LBrace,
-            Token::Identifier("a".to_string()),
-            Token::Plus,
-            Token::Identifier("b".to_string()),
-            Token::Semicolon,
-            Token::RBrace,
-            Token::Eof,
+            TokenKind::Fun,
+            TokenKind::Identifier("add".to_string()),
+            TokenKind::LParen,
+            TokenKind::Identifier("a".to_string()),
+            TokenKind::Comma,
+            TokenKind::Identifier("b".to_string()),
+            TokenKind::RParen,
+            TokenKind::LBrace,
+            TokenKind::Identifier("a".to_string()),
+            TokenKind::Plus,
+            TokenKind::Identifier("b".to_string()),
+            TokenKind::Semicolon,
+            TokenKind::RBrace,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(lexer.next_token(), expected);
+            assert_eq!(lexer.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_comments() {
         let input = "let x = 10; // This is a comment\nlet y = x + 5;";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Let,
-            Token::Identifier("x".to_string()),
-            Token::Assign,
-            Token::IntNum(10),
-            Token::Semicolon,
-            Token::Let,
-            Token::Identifier("y".to_string()),
-            Token::Assign,
-            Token::Identifier("x".to_string()),
-            Token::Plus,
-            Token::IntNum(5),
-            Token::Semicolon,
-            Token::Eof,
+            TokenKind::Let,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Assign,
+            TokenKind::IntNum(10),
+            TokenKind::Semicolon,
+            TokenKind::Let,
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Assign,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Plus,
+            TokenKind::IntNum(5),
+            TokenKind::Semicolon,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(lexer.next_token(), expected);
+            assert_eq!(lexer.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_int_float_bool_tokens() {
         let input = "123 45.6 true false 999";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::IntNum(123),
-            Token::FloatNum(45.6),
-            Token::BoolLiteral(true),
-            Token::BoolLiteral(false),
-            Token::IntNum(999),
-            Token::Eof,
+            TokenKind::IntNum(123),
+            TokenKind::FloatNum(45.6),
+            TokenKind::BoolLiteral(true),
+            TokenKind::BoolLiteral(false),
+            TokenKind::IntNum(999),
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(lexer.next_token(), expected);
+            assert_eq!(lexer.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_comparison_tokens() {
         let input = "= == != < <= > >=";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Assign,
-            Token::Equal,
-            Token::NotEqual,
-            Token::LessThan,
-            Token::LessEqual,
-            Token::GreaterThan,
-            Token::GreaterEqual,
-            Token::Eof,
+            TokenKind::Assign,
+            TokenKind::Equal,
+            TokenKind::NotEqual,
+            TokenKind::LessThan,
+            TokenKind::LessEqual,
+            TokenKind::GreaterThan,
+            TokenKind::GreaterEqual,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(lexer.next_token(), expected);
+            assert_eq!(lexer.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_type_annotation_token() {
         let input = "let x: int = 10;";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Let,
-            Token::Identifier("x".to_string()),
-            Token::Colon,
-            Token::Identifier("int".to_string()), // Treat type name as identifier for now
-            Token::Assign,
-            Token::IntNum(10),
-            Token::Semicolon,
-            Token::Eof,
+            TokenKind::Let,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Colon,
+            TokenKind::Identifier("int".to_string()), // Treat type name as identifier for now
+            TokenKind::Assign,
+            TokenKind::IntNum(10),
+            TokenKind::Semicolon,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(lexer.next_token(), expected);
+            assert_eq!(lexer.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_var_keyword() {
         let input = "var counter = 0;";
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Var,
-            Token::Identifier("counter".to_string()),
-            Token::Assign,
-            Token::IntNum(0),
-            Token::Semicolon,
-            Token::Eof,
+            TokenKind::Var,
+            TokenKind::Identifier("counter".to_string()),
+            TokenKind::Assign,
+            TokenKind::IntNum(0),
+            TokenKind::Semicolon,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(lexer.next_token(), expected);
+            assert_eq!(lexer.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_if_else_tokens() {
         let input = "if (x < 10) { x = x + 1; } else { x = 0; }";
-        let mut l = Lexer::new(input);
+        let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::If,
-            Token::LParen,
-            Token::Identifier("x".into()),
-            Token::LessThan,
-            Token::IntNum(10),
-            Token::RParen,
-            Token::LBrace,
-            Token::Identifier("x".into()),
-            Token::Assign,
-            Token::Identifier("x".into()),
-            Token::Plus,
-            Token::IntNum(1),
-            Token::Semicolon,
-            Token::RBrace,
-            Token::Else,
-            Token::LBrace,
-            Token::Identifier("x".into()),
-            Token::Assign,
-            Token::IntNum(0),
-            Token::Semicolon,
-            Token::RBrace,
-            Token::Eof,
+            TokenKind::If,
+            TokenKind::LParen,
+            TokenKind::Identifier("x".into()),
+            TokenKind::LessThan,
+            TokenKind::IntNum(10),
+            TokenKind::RParen,
+            TokenKind::LBrace,
+            TokenKind::Identifier("x".into()),
+            TokenKind::Assign,
+            TokenKind::Identifier("x".into()),
+            TokenKind::Plus,
+            TokenKind::IntNum(1),
+            TokenKind::Semicolon,
+            TokenKind::RBrace,
+            TokenKind::Else,
+            TokenKind::LBrace,
+            TokenKind::Identifier("x".into()),
+            TokenKind::Assign,
+            TokenKind::IntNum(0),
+            TokenKind::Semicolon,
+            TokenKind::RBrace,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(l.next_token(), expected);
+            assert_eq!(l.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_bang_operator() {
         let input = "!true != false";
-        let mut l = Lexer::new(input);
+        let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Bang,
-            Token::BoolLiteral(true),
-            Token::NotEqual,
-            Token::BoolLiteral(false),
-            Token::Eof,
+            TokenKind::Bang,
+            TokenKind::BoolLiteral(true),
+            TokenKind::NotEqual,
+            TokenKind::BoolLiteral(false),
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(l.next_token(), expected);
+            assert_eq!(l.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_while_keyword() {
         let input = "while (i < 10) { i = i + 1; }";
-        let mut l = Lexer::new(input);
+        let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::While,
-            Token::LParen,
-            Token::Identifier("i".into()),
-            Token::LessThan,
-            Token::IntNum(10),
-            Token::RParen,
-            Token::LBrace,
-            Token::Identifier("i".into()),
-            Token::Assign,
-            Token::Identifier("i".into()),
-            Token::Plus,
-            Token::IntNum(1),
-            Token::Semicolon,
-            Token::RBrace,
-            Token::Eof,
+            TokenKind::While,
+            TokenKind::LParen,
+            TokenKind::Identifier("i".into()),
+            TokenKind::LessThan,
+            TokenKind::IntNum(10),
+            TokenKind::RParen,
+            TokenKind::LBrace,
+            TokenKind::Identifier("i".into()),
+            TokenKind::Assign,
+            TokenKind::Identifier("i".into()),
+            TokenKind::Plus,
+            TokenKind::IntNum(1),
+            TokenKind::Semicolon,
+            TokenKind::RBrace,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(l.next_token(), expected);
+            assert_eq!(l.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_for_keyword() {
         let input = "for (i = 0; i < 10; i = i + 1) { print(i); }";
-        let mut l = Lexer::new(input);
+        let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::For,
-            Token::LParen,
-            Token::Identifier("i".into()),
-            Token::Assign,
-            Token::IntNum(0),
-            Token::Semicolon,
-            Token::Identifier("i".into()),
-            Token::LessThan,
-            Token::IntNum(10),
-            Token::Semicolon,
-            Token::Identifier("i".into()),
-            Token::Assign,
-            Token::Identifier("i".into()),
-            Token::Plus,
-            Token::IntNum(1),
-            Token::RParen,
-            Token::LBrace,
-            Token::Identifier("print".into()),
-            Token::LParen,
-            Token::Identifier("i".into()),
-            Token::RParen,
-            Token::Semicolon,
-            Token::RBrace,
-            Token::Eof,
+            TokenKind::For,
+            TokenKind::LParen,
+            TokenKind::Identifier("i".into()),
+            TokenKind::Assign,
+            TokenKind::IntNum(0),
+            TokenKind::Semicolon,
+            TokenKind::Identifier("i".into()),
+            TokenKind::LessThan,
+            TokenKind::IntNum(10),
+            TokenKind::Semicolon,
+            TokenKind::Identifier("i".into()),
+            TokenKind::Assign,
+            TokenKind::Identifier("i".into()),
+            TokenKind::Plus,
+            TokenKind::IntNum(1),
+            TokenKind::RParen,
+            TokenKind::LBrace,
+            TokenKind::Identifier("print".into()),
+            TokenKind::LParen,
+            TokenKind::Identifier("i".into()),
+            TokenKind::RParen,
+            TokenKind::Semicolon,
+            TokenKind::RBrace,
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(l.next_token(), expected);
+            assert_eq!(l.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_string_literal() {
         let input = r#" "Hello" "World\n123\"\\" "#;
-        let mut l = Lexer::new(input);
+        let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::StringLiteral("Hello".to_string()),
-            Token::StringLiteral("World\n123\"\\".to_string()),
-            Token::Eof,
+            TokenKind::StringLiteral("Hello".to_string()),
+            TokenKind::StringLiteral("World\n123\"\\".to_string()),
+            TokenKind::Eof,
         ];
         for expected in tokens {
-            assert_eq!(l.next_token(), expected);
+            assert_eq!(l.next_token().kind, expected);
         }
     }
 
     #[test]
     fn test_unterminated_string() {
         let input = r#" "abc "#;
-        let mut l = Lexer::new(input);
-        assert_eq!(l.next_token(), Token::Illegal('"'));
+        let mut l = Lexer::new("test.txt".to_string(), input);
+        assert_eq!(l.next_token().kind, TokenKind::Illegal('"'));
     }
 
     #[test]
     fn test_return_keyword() {
         let input = "return 10;";
-        let mut l = Lexer::new(input);
+        let mut l = Lexer::new("test.txt".to_string(), input);
         let tokens = vec![
-            Token::Return, Token::IntNum(10), Token::Semicolon, Token::Eof,
+            TokenKind::Return,
+            TokenKind::IntNum(10),
+            TokenKind::Semicolon,
+            TokenKind::Eof,
         ];
-        for expected in tokens { assert_eq!(l.next_token(), expected); }
+        for expected in tokens {
+            assert_eq!(l.next_token().kind, expected);
+        }
     }
+
     #[test]
-    fn test_return_void() { // If we allow `return;`
+    fn test_return_void() {
+        // If we allow `return;`
         let input = "return;";
-        let mut l = Lexer::new(input);
-        let tokens = vec![
-            Token::Return, Token::Semicolon, Token::Eof,
-        ];
-        for expected in tokens { assert_eq!(l.next_token(), expected); }
+        let mut l = Lexer::new("test.txt".to_string(), input);
+        let tokens = vec![TokenKind::Return, TokenKind::Semicolon, TokenKind::Eof];
+        for expected in tokens {
+            assert_eq!(l.next_token().kind, expected);
+        }
     }
 }
