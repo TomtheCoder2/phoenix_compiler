@@ -1,6 +1,8 @@
 use clap::Parser;
 use inkwell::context::Context;
-use std::fs;
+use std::{fs, os};
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 use phoenix_compiler::codegen::Compiler;
 use phoenix_compiler::lexer::Lexer;
@@ -42,6 +44,11 @@ fn main() {
             }
         }
     }
+    // check if output file exists and if yes delete it
+    output_path.exists().then(||{
+        println!("Deleting file {}", output_path.display());
+        fs::remove_file(output_path).unwrap();
+    });
     let input = match fs::read_to_string(input_path) {
         Ok(content) => content,
         Err(e) => {

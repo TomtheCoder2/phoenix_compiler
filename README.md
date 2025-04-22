@@ -57,14 +57,16 @@ main();
 
 ```bash
 # Build the compiler
-cargo build --release
+cargo build -p phoenix_runtime -r; 
+cargo build -r
 
 # Compile a Phoenix file
-./target/release/phoenix your_file.px
+./target/release/compiler --input program.px
 
 # Run the compiled program
-./your_file
+./output/output
 ```
+(Currently only tested on mac)
 
 ## Project Status
 
