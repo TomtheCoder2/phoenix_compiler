@@ -95,6 +95,8 @@ impl<'a> Lexer<'a> {
             }
             Some('(') => TokenKind::LParen,
             Some(')') => TokenKind::RParen,
+            Some(']') => TokenKind::RBracket,
+            Some('[') => TokenKind::LBracket,
             Some(';') => TokenKind::Semicolon,
             Some(',') => TokenKind::Comma,
             Some('{') => TokenKind::LBrace,

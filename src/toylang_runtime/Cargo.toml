@@ -8,3 +8,4 @@ crate-type = ["staticlib"] # Compile as a static library
 name = "toylang_runtime"
 
 [dependencies]
+libc = "1.0.0-alpha.1"

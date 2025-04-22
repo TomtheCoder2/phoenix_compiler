@@ -1,8 +1,40 @@
 use crate::location::Span;
 use crate::types::Type;
+use std::cell::RefCell;
 
 // src/ast.rs
 pub type NumberType = f64;
+
+// Type Annotation Node (used in Let/Var/Params/Return)
+#[derive(Debug, PartialEq, Clone)]
+pub struct TypeNode {
+    pub kind: TypeNodeKind,
+    pub span: Span,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum TypeNodeKind {
+    Simple(String), // "int", "float", "bool", "string"
+    Vector(Box<TypeNode>), // vec< T > where T is another TypeNode
+                    // Add Function, Tuple etc. later
+}
+
+pub fn type_node_to_type(type_node: &TypeNode) -> Type {
+    match &type_node.kind {
+        TypeNodeKind::Simple(name) => match name.as_str() {
+            "int" => Type::Int,
+            "float" => Type::Float,
+            "bool" => Type::Bool,
+            "string" => Type::String,
+            "void" => Type::Void,
+            _ => panic!("Unknown type: {}", name),
+        },
+        TypeNodeKind::Vector(inner_type) => {
+            let inner = type_node_to_type(inner_type);
+            Type::Vector(Box::new(inner))
+        }
+    }
+}
 
 // Program is still a list of statements
 #[derive(Debug, PartialEq, Clone)]
@@ -29,6 +61,37 @@ pub fn defs(statement_kind: StatementKind) -> Statement {
 pub struct Expression {
     pub kind: ExpressionKind,
     pub span: Span, // Span covering the whole expression
+    // Added: Stores the type determined by the type checker
+    // Use RefCell for interior mutability: allows type checker to set the type
+    // on a potentially immutably borrowed AST node during traversal.
+    // Default to None initially.
+    pub resolved_type: RefCell<Option<Type>>,
+}
+
+impl Expression {
+    // Helper to create expression node
+    pub fn new(kind: ExpressionKind, span: Span) -> Self {
+        Expression {
+            kind,
+            span,
+            resolved_type: RefCell::new(None), // Initialize as None
+        }
+    }
+
+    // // Helper to get the resolved type (immutable borrow)
+    // pub fn get_type(&self) -> Option<Type> {
+    //     *self.resolved_type.borrow() // Dereference Ref<Option<Type>>
+    // }
+
+    // Helper to set the resolved type (mutable borrow)
+    pub fn set_type(&self, ty: Type) {
+        *self.resolved_type.borrow_mut() = Some(ty);
+    }
+
+    // Helper to check if type has been set
+    pub fn has_type(&self) -> bool {
+        self.resolved_type.borrow().is_some()
+    }
 }
 
 /// Creates a new `Expression` from the given `ExpressionKind`.
@@ -55,7 +118,8 @@ pub struct Expression {
 pub fn def(expr: ExpressionKind) -> Expression {
     Expression {
         kind: expr,
-        span: Span::default(), // Default span for now
+        span: Span::default(),             // Default span for now
+        resolved_type: RefCell::new(None), // Initialize as None
     }
 }
 
@@ -64,19 +128,19 @@ pub enum StatementKind {
     // Renamed from Statement
     LetBinding {
         name: String,
-        type_ann: Option<Type>,
+        type_ann: Option<TypeNode>,
         value: Expression,
     }, // Value is now Expression struct
     VarBinding {
         name: String,
-        type_ann: Option<Type>,
+        type_ann: Option<TypeNode>,
         value: Expression,
     },
     ExpressionStmt(Expression), // Holds Expression struct
     FunctionDef {
         name: String,
-        params: Vec<(String, Option<Type>)>,
-        return_type_ann: Option<Type>,
+        params: Vec<(String, Option<TypeNode>)>,
+        return_type_ann: Option<TypeNode>,
         body: Program,
     }, // Body is Program struct
     IfStmt {
@@ -143,6 +207,15 @@ pub enum ExpressionKind {
     UnaryOp {
         op: UnaryOperator,
         operand: Box<Expression>,
+    },
+    // Added for Vectors
+    VectorLiteral {
+        elements: Vec<Expression>, // e.g., [1, 2, 3]
+                                   // Element type is inferred or checked later
+    },
+    IndexAccess {
+        target: Box<Expression>, // Expression yielding a vector (or array/string later)
+        index: Box<Expression>,  // Expression yielding an integer index
     },
 }
 

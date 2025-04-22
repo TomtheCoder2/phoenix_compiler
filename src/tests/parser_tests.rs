@@ -2,12 +2,11 @@
 mod tests {
     use crate::ast::{
         def, BinaryOperator, BinaryOperator::*, ComparisonOperator, Expression, ExpressionKind,
-        ExpressionKind::*, StatementKind, StatementKind::*, UnaryOperator,
+        ExpressionKind::*, StatementKind, StatementKind::*, TypeNodeKind, UnaryOperator,
     };
     use crate::lexer::Lexer;
     use crate::parser::{ParseError, Parser};
     use crate::token::TokenKind;
-    use crate::types::Type;
 
     // Helper builders
     fn num(val: f64) -> ExpressionKind {
@@ -499,7 +498,7 @@ mod tests {
         let lexer = Lexer::new("test".to_string(), input);
         let mut parser = Parser::new(lexer);
         let program = parser.parse_program().unwrap();
-        
+
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0].kind {
             ExpressionStmt(expr) => match &expr.kind {
@@ -580,7 +579,11 @@ mod tests {
                 value,
             } => {
                 assert_eq!(name, "count");
-                assert_eq!(type_ann, &Some(Type::Int));
+                match &type_ann.clone().unwrap().kind {
+                    // Unwrap to get the TypeNode}
+                    TypeNodeKind::Simple(t) => assert_eq!(t, "int"),
+                    _ => panic!("Expected TypeNode"),
+                }
                 assert_eq!(value.kind, IntLiteral(100));
             }
             _ => panic!("Expected LetBinding"),
@@ -600,7 +603,10 @@ mod tests {
                 value,
             } => {
                 assert_eq!(name, "counter");
-                assert_eq!(type_ann, &Some(Type::Int));
+                match &type_ann.clone().unwrap().kind {
+                    TypeNodeKind::Simple(t) => assert_eq!(t, "int"),
+                    _ => panic!("Expected TypeNode"),
+                }
                 assert_eq!(value.kind, IntLiteral(0));
             }
             _ => panic!("Expected VarBinding"),
@@ -854,6 +860,82 @@ mod tests {
                 assert!(value.is_none());
             }
             _ => panic!("Expected ReturnStmt"),
+        }
+    }
+
+    #[test]
+    fn test_parse_vector_literal() {
+        /* ... test [1, 2, 3] ... */
+        let input = "[1, 2, 3];";
+
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::VectorLiteral { elements } => {
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].kind, IntLiteral(1));
+                    assert_eq!(elements[1].kind, IntLiteral(2));
+                    assert_eq!(elements[2].kind, IntLiteral(3));
+                }
+                _ => panic!("Expected VectorLiteral"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
+    #[test]
+    fn test_parse_index_access() {
+        /* ... test my_vec[0] ... */
+        let input = "my_vec[0];";
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::IndexAccess { target, index } => {
+                    assert_eq!(target.kind, Variable("my_vec".to_string()));
+                    assert_eq!(index.kind, IntLiteral(0));
+                }
+                _ => panic!("Expected IndexAccess"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
+    #[test]
+    fn test_parse_vec_type_annotation() {
+        /* ... test let x: vec<int> = ... */
+        let input = "let x: vec<int> = [1, 2, 3];";
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::LetBinding {
+                name,
+                type_ann,
+                value,
+            } => {
+                assert_eq!(name, "x");
+                match &type_ann.clone().unwrap().kind {
+                    TypeNodeKind::Vector(t) => {
+                        assert_eq!(t.kind, TypeNodeKind::Simple("int".to_string()));
+                    }
+                    _ => panic!("Expected TypeNode"),
+                }
+                match &value.kind {
+                    ExpressionKind::VectorLiteral { elements } => {
+                        assert_eq!(elements.len(), 3);
+                        assert_eq!(elements[0].kind, IntLiteral(1));
+                        assert_eq!(elements[1].kind, IntLiteral(2));
+                        assert_eq!(elements[2].kind, IntLiteral(3));
+                    }
+                    _ => panic!("Expected VectorLiteral"),
+                }
+            }
+            _ => panic!("Expected LetBinding"),
         }
     }
 }

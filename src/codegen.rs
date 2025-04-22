@@ -1,8 +1,8 @@
 // src/codegen.rs
 
 use crate::ast::{
-    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program, Statement,
-    StatementKind, UnaryOperator,
+    type_node_to_type, BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program,
+    Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
 };
 use crate::location::Span;
 // Added BasicValueEnum
@@ -14,7 +14,7 @@ use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use inkwell::types::BasicMetadataTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::AnyValue;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
@@ -24,6 +24,12 @@ use std::default::Default;
 use std::ffi::CString;
 use std::fmt;
 use std::path::Path;
+
+const RUNTIME_VEC_NEW: &str = "_toylang_vec_new"; // fn(elem_size: i64, capacity: i64) -> i8*
+const RUNTIME_VEC_GET_PTR: &str = "_toylang_vec_get_ptr"; // fn(vec_handle: i8*, index: i64) -> i8* (pointer to element)
+const RUNTIME_VEC_LEN: &str = "_toylang_vec_len"; // fn(vec_handle: i8*) -> i64
+const RUNTIME_VEC_PUSH: &str = "_toylang_vec_push"; // fn(vec_handle: i8*, value_ptr: i8*) -> void
+const RUNTIME_VEC_FREE: &str = "_toylang_vec_free"; // fn(vec_handle: i8*) -> void
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -117,7 +123,7 @@ type CompileExprResult<'ctx> = Result<BasicValueEnum<'ctx>, CodeGenError>;
 type CompileStmtResult<'ctx> = Result<(Option<BasicValueEnum<'ctx>>, bool), CodeGenError>;
 
 // Helper struct to store variable info (pointer + type)
-#[derive(Debug, Clone, Copy)] // Copy is efficient as PointerValue/Type are Copy
+#[derive(Debug, Clone)] // Copy is efficient as PointerValue/Type are Copy
 struct VariableInfo<'ctx> {
     ptr: PointerValue<'ctx>,
     ty: Type,
@@ -132,7 +138,7 @@ pub struct Compiler<'a, 'ctx> {
     variables: HashMap<String, VariableInfo<'ctx>>,
     // Function map stores signature (params + return) along with FunctionValue
     // Using our Type enum for the signature representation.
-    functions: HashMap<String, (Vec<Type>, Type, FunctionValue<'ctx>)>,
+    pub(crate) functions: HashMap<String, (Vec<Type>, Type, FunctionValue<'ctx>)>,
     current_function_return_type: Option<Type>, // Track expected return type
     fpm: PassManager<FunctionValue<'ctx>>,
     // Keep print wrapper stuff
@@ -142,6 +148,12 @@ pub struct Compiler<'a, 'ctx> {
     print_bool_wrapper_func: Option<FunctionValue<'ctx>>,
     print_str_wrapper_func: Option<FunctionValue<'ctx>>, // Added cache
     print_str_ln_wrapper_func: Option<FunctionValue<'ctx>>,
+    // vec cache
+    vec_new_func: Option<FunctionValue<'ctx>>,
+    vec_get_ptr_func: Option<FunctionValue<'ctx>>,
+    vec_len_func: Option<FunctionValue<'ctx>>,
+    vec_push_func: Option<FunctionValue<'ctx>>,
+    vec_free_func: Option<FunctionValue<'ctx>>,
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -189,7 +201,107 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             print_bool_wrapper_func: None,
             print_str_wrapper_func: None, // Added cache
             print_str_ln_wrapper_func: None,
+            vec_new_func: None,
+            vec_get_ptr_func: None,
+            vec_len_func: None,
+            vec_push_func: None,
+            vec_free_func: None, // Init new caches
         }
+    }
+
+    /// Compile the program into the module, generating a standard C main function
+    /// that calls printf with the result of the last top-level expression.
+    pub fn compile_program_to_module(&mut self, program: &Program) -> Result<(), CodeGenError> {
+        // --- Reset state for this compilation unit ---
+        self.functions.clear(); // Clear user function definitions (printf is handled separately)
+        self.print_float_wrapper_func = None;
+        self.print_int_wrapper_func = None;
+        self.print_bool_wrapper_func = None;
+        self.print_str_wrapper_func = None; // Reset string wrapper cache too
+        self.print_str_ln_wrapper_func = None;
+        self.vec_new_func = None;
+        self.vec_get_ptr_func = None;
+        self.vec_len_func = None;
+        self.vec_push_func = None;
+        self.vec_free_func = None;
+
+        // --- Declare Printf Early ---
+        // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)
+
+        // --- Define User Functions ---
+        // First pass: Define all user functions so they are available for calls
+        // Need to be careful about compile_statement potentially modifying state needed later
+        // Let's compile functions within the main loop for now, requires functions defined before use.
+        // A multi-pass approach might be better later.
+
+        // --- Setup C-Style Main Function ---
+        let i32_type = self.context.i32_type();
+        // Standard C main signature: int main() (or int main(int argc, char** argv))
+        // We'll use the simple int main() for now.
+        let main_fn_type = i32_type.fn_type(&[], false);
+        let main_function = self.module.add_function(
+            "main", // Standard C entry point name
+            main_fn_type,
+            None, // Default linkage (usually external)
+        );
+        let entry_block = self.context.append_basic_block(main_function, "entry");
+
+        // --- Save/Restore context ---
+        let original_builder_pos = self.builder.get_insert_block();
+        let original_func = self.current_function;
+        let original_vars = self.variables.clone();
+        self.builder.position_at_end(entry_block);
+        self.current_function = Some(main_function);
+        self.variables.clear();
+
+        // --- Compile Top-Level Statements ---
+        // let mut last_main_expr_value: Option<FloatValue<'ctx>> = None;
+        for stmt in &program.statements {
+            self.compile_statement(stmt)?;
+            // match self.compile_statement(stmt)? {
+            //     Some(value) => last_main_expr_value = Some(value),
+            //     None => {} // LetBinding or FunctionDef
+            // }
+        }
+
+        // --- Build Return for C Main (return 0) ---
+        self.builder
+            .build_return(Some(&i32_type.const_int(0, false))); // return 0;
+
+        // --- Restore Compiler State ---
+        // ... (restore variables, current_function, builder position) ...
+        self.variables = original_vars;
+        self.current_function = original_func;
+        if let Some(bb) = original_builder_pos {
+            self.builder.position_at_end(bb);
+        }
+
+        // --- Optimize and Verify Main ---
+        // No need to optimize here if we optimize later or let TargetMachine handle it?
+        // Let's keep the FPM run on main for consistency for now.
+        if main_function.verify(true) {
+            let changed = self.fpm.run_on(&main_function);
+            if changed {
+                println!("Optimizer changed function 'main'");
+            }
+            if !main_function.verify(true) {
+                // Handle verification failure after optimization
+                // unsafe { main_function.delete(); } // No need to delete, just return Err
+                return Err(CodeGenError::LlvmError(
+                    "Main function verification failed after optimization".to_string(),
+                    Span::default(), // Placeholder, should be the actual span of the main function
+                ));
+            }
+        } else {
+            // Handle verification failure before optimization
+            // unsafe { main_function.delete(); }
+            return Err(CodeGenError::LlvmError(
+                "Main function verification failed before optimization".to_string(),
+                Span::default(), // Placeholder, should be the actual span of the main function
+            ));
+        }
+
+        Ok(()) // Module is ready
     }
 
     // Helper to get the type of an expression - NEEDS TYPE CHECKING PHASE ideally
@@ -203,7 +315,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ExpressionKind::Variable(name) => {
                 self.variables
                     .get(name)
-                    .map(|info| info.ty) // Get type from symbol table
+                    .map(|info| info.ty.clone()) // Get type from symbol table
                     .ok_or_else(|| CodeGenError::MissingTypeInfo(name.clone(), span))
                 // Error if var used before defined (or type missing)
             }
@@ -221,7 +333,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // Look up function's declared return type
                 self.functions
                     .get(name)
-                    .map(|(_, ret_ty, _)| *ret_ty) // Get return type from map
+                    .map(|(_, ret_ty, _)| ret_ty.clone()) // Get return type from map
                     .ok_or_else(|| {
                         CodeGenError::MissingTypeInfo(format!("function {}", name), span)
                     })
@@ -269,14 +381,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             None => temp_builder.position_at_end(entry_block),
         };
         // Allocate memory for the correct LLVM type based on ToyLang Type
-        let llvm_type = ty.to_llvm_basic_type(self.context);
+        let llvm_type = match ty.to_llvm_basic_type(self.context) {
+            Some(llvm_type) => llvm_type,
+            None => {
+                panic!("Invalid type for variable '{}'", name);
+            }
+        };
         // todo: check if unwrap is safe
         temp_builder.build_alloca(llvm_type, name).unwrap()
     }
 
     /// Compiles a single Expression node (used by statements)
     /// Returns a FloatValue representing the result of the expression.
-    fn compile_expression(&mut self, expr: &Expression) -> CompileExprResult<'ctx> {
+    pub fn compile_expression(&mut self, expr: &Expression) -> CompileExprResult<'ctx> {
         let span = expr.span.clone();
         match &expr.kind {
             ExpressionKind::FloatLiteral(value) => {
@@ -301,7 +418,15 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ExpressionKind::Variable(name) => {
                 match self.variables.get(name) {
                     Some(info) => {
-                        let llvm_type = info.ty.to_llvm_basic_type(self.context);
+                        let llvm_type = match info.ty.to_llvm_basic_type(self.context) {
+                            Some(llvm_type) => llvm_type,
+                            None => {
+                                return Err(CodeGenError::InvalidType(
+                                    format!("Invalid type for variable '{}'", name),
+                                    span,
+                                ))
+                            }
+                        };
                         let loaded_val = self
                             .builder
                             .build_load(llvm_type, info.ptr, name)
@@ -584,15 +709,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     } else if name == "print_str" {
                         match arg_value {
                             BasicValueEnum::PointerValue(pv)
-                                if pv.get_type()
-                                    == self.context.i8_type().ptr_type(AddressSpace::default()) => {
-                            }
+                            if pv.get_type()
+                                == self.context.i8_type().ptr_type(AddressSpace::default()) => {}
                             _ => {
                                 return Err(CodeGenError::PrintStrArgError(
                                     format!(
-                                "Argument must be a string literal (evaluating to i8*), found {:?}",
-                                arg_value.get_type()
-                            ),
+                                        "Argument must be a string literal (evaluating to i8*), found {:?}",
+                                        arg_value.get_type()
+                                    ),
                                     span,
                                 ))
                             }
@@ -669,7 +793,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         Vec::with_capacity(args.len());
                     for (i, arg_expr) in args.iter().enumerate() {
                         let arg_val = self.compile_expression(arg_expr)?;
-                        let expected_llvm_type = param_types[i].to_llvm_basic_type(self.context);
+                        let expected_llvm_type =
+                            match param_types[i].to_llvm_basic_type(self.context) {
+                                Some(llvm_type) => llvm_type,
+                                None => {
+                                    return Err(CodeGenError::InvalidType(
+                                        format!(
+                                            "Invalid type for argument {} in function '{}'",
+                                            i, name
+                                        ),
+                                        span,
+                                    ))
+                                }
+                            };
                         // --- Type Checking/Conversion (Basic) ---
                         if arg_val.get_type() != expected_llvm_type {
                             // Attempt basic conversion (e.g., int to float) if needed later
@@ -703,7 +839,15 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         _ => {
                             // Expect Int, Float, or Bool
                             let expected_llvm_ret_type =
-                                return_type.to_llvm_basic_type(self.context);
+                                match return_type.to_llvm_basic_type(self.context) {
+                                    Some(llvm_type) => llvm_type,
+                                    None => {
+                                        return Err(CodeGenError::InvalidType(
+                                            format!("Invalid return type for function '{}'", name),
+                                            span,
+                                        ))
+                                    }
+                                };
                             match call_site_val.try_as_basic_value().left() {
                                 Some(ret_val) if ret_val.get_type() == expected_llvm_ret_type => {
                                     Ok(ret_val)
@@ -737,7 +881,15 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 }
 
                 // 4. Check Type Match (Basic - needs proper type checking/conversion)
-                let expected_llvm_type = var_info.ty.to_llvm_basic_type(self.context);
+                let expected_llvm_type = match var_info.ty.to_llvm_basic_type(self.context) {
+                    Some(llvm_type) => llvm_type,
+                    None => {
+                        return Err(CodeGenError::InvalidType(
+                            format!("Invalid type for variable '{}'", target),
+                            span,
+                        ))
+                    }
+                };
                 if compiled_value.get_type() != expected_llvm_type {
                     // TODO: Implement type conversion or error properly
                     return Err(CodeGenError::InvalidType(
@@ -888,6 +1040,212 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 Ok(result)
             }
+
+            // --- Vector Literal ---
+            ExpressionKind::VectorLiteral { elements } => {
+                // 1. Infer element type (Type Checker should have ensured consistency)
+                // We need the actual type here for size calculation. Re-check first element? Risky.
+                // Assume type checker worked and passed info somehow, or re-infer.
+                if elements.is_empty() {
+                    // How to handle empty vector literal? Need type context.
+                    return Err(CodeGenError::InvalidAstNode(
+                        "Cannot codegen empty vector literal without type context".to_string(),
+                        span,
+                    ));
+                }
+                // Infer from first element - relies on type checker having run correctly
+                let first_elem_val = self.compile_expression(&elements[0])?;
+                let elem_llvm_type = first_elem_val.get_type();
+                let elem_toy_type =
+                    match elem_llvm_type {
+                        // Basic reverse map
+                        BasicTypeEnum::FloatType(_) => Type::Float,
+                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1 => Type::Bool,
+                        BasicTypeEnum::IntType(_) => Type::Int,
+                        BasicTypeEnum::PointerType(_) => Type::String, // Assuming string ptr
+                        _ => return Err(CodeGenError::InvalidType(
+                            "Unsupported vector element type. todo: make ast annotate the types"
+                                .to_string(),
+                            span,
+                        )),
+                    };
+                let elem_size = self.get_sizeof(&elem_toy_type).unwrap_or(0);
+                if elem_size == 0 {
+                    return Err(CodeGenError::InvalidType(
+                        "Vector elements cannot be void".to_string(),
+                        span,
+                    ));
+                }
+
+                // 2. Call runtime vec_new(elem_size, capacity)
+                let vec_new_func = self.get_or_declare_vec_new();
+                let capacity = self
+                    .context
+                    .i64_type()
+                    .const_int(elements.len() as u64, false);
+                let elem_size_val = self.context.i64_type().const_int(elem_size, false);
+                let vec_handle = match self.builder.build_call(
+                    vec_new_func,
+                    &[elem_size_val.into(), capacity.into()],
+                    "new_vec",
+                ) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error during vec_new call: {}", e),
+                            span,
+                        ))
+                    }
+                }
+                .try_as_basic_value()
+                .left()
+                .ok_or_else(|| {
+                    CodeGenError::LlvmError("vec_new call failed".to_string(), span.clone())
+                })?
+                .into_pointer_value(); // Should return i8* handle
+
+                // 3. Compile element expressions and store them
+                let vec_get_ptr_func = self.get_or_declare_vec_get_ptr();
+                for (i, elem_expr) in elements.iter().enumerate() {
+                    let elem_val = self.compile_expression(elem_expr)?;
+                    // Check type match (should be guaranteed by type checker)
+                    if elem_val.get_type() != elem_llvm_type { /* Internal Compiler Error */ }
+
+                    // Get pointer to element slot i: ptr = vec_get_ptr(handle, i)
+                    let index_val = self.context.i64_type().const_int(i as u64, false);
+                    let elem_ptr_i8 = match self.builder.build_call(
+                        vec_get_ptr_func,
+                        &[vec_handle.into(), index_val.into()],
+                        "elem_ptr_i8",
+                    ) {
+                        Ok(val) => val,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("LLVM error during vec_get_ptr call: {}", e),
+                                span.clone(),
+                            ))
+                        }
+                    }
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or(CodeGenError::LlvmError(
+                        "vec_get_ptr call failed".to_string(),
+                        span.clone(),
+                    ))?
+                    .into_pointer_value();
+
+                    // Cast i8* element slot pointer to actual element type pointer
+                    let elem_ptr_typed = match self.builder.build_pointer_cast(
+                        elem_ptr_i8,
+                        self.context.ptr_type(AddressSpace::default()), // e.g., i64*, float*
+                        "elem_ptr_typed",
+                    ) {
+                        Ok(val) => val,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("LLVM error during pointer cast: {}", e),
+                                span.clone(),
+                            ))
+                        }
+                    };
+
+                    // Store the compiled element value into the slot
+                    match self.builder.build_store(elem_ptr_typed, elem_val) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("LLVM error during store: {}", e),
+                                span.clone(),
+                            ))
+                        }
+                    }
+                }
+
+                // 4. Vector literal expression evaluates to the handle (i8*)
+                Ok(vec_handle.into())
+            }
+
+            // --- Index Access ---
+            ExpressionKind::IndexAccess { target, index } => {
+                // 1. Compile target (expect i8* vector handle) and index (expect i64)
+                let target_handle = self.compile_expression(target)?;
+                let index_val = self.compile_expression(index)?;
+
+                // Type check results (basic)
+                let vec_handle_ptr = match target_handle {
+                    BasicValueEnum::PointerValue(pv) => pv, // Assume it's the i8* handle
+                    _ => {
+                        return Err(CodeGenError::InvalidType(
+                            "Target of index must be a vector".to_string(),
+                            span,
+                        ))
+                    }
+                };
+                let index_i64 = match index_val {
+                    BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 64 => iv,
+                    _ => {
+                        return Err(CodeGenError::InvalidType(
+                            "Index must be an integer".to_string(),
+                            span,
+                        ))
+                    }
+                };
+
+                // 2. Determine Element Type (Need this from type checker!)
+                // We lost the element type info here. We need the type checker pass
+                // to potentially annotate the AST IndexAccess node with the vector's element type.
+                let elem_toy_type =
+                    expr.resolved_type.borrow().clone().expect(
+                        "IndexAccess expression should have resolved type from type checker",
+                    );
+                let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
+
+                // 3. Call runtime vec_get_ptr(handle, index) -> i8*
+                let vec_get_ptr_func = self.get_or_declare_vec_get_ptr();
+                let elem_ptr_i8 = match self.builder.build_call(
+                    vec_get_ptr_func,
+                    &[vec_handle_ptr.into(), index_i64.into()],
+                    "elem_ptr_i8",
+                ) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error during vec_get_ptr call: {}", e),
+                            span,
+                        ))
+                    }
+                }
+                .try_as_basic_value()
+                .left()
+                .ok_or(CodeGenError::LlvmError(
+                    "vec_get_ptr call failed".to_string(),
+                    span.clone(),
+                ))?
+                .into_pointer_value();
+
+                // 4. Cast i8* element slot pointer to actual element type pointer
+                let elem_ptr_typed = match self.builder.build_pointer_cast(
+                    elem_ptr_i8,
+                    elem_llvm_type.ptr_type(AddressSpace::default()),
+                    "elem_ptr_typed",
+                ) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error during pointer cast: {}", e),
+                            span.clone(),
+                        ))
+                    }
+                };
+
+                // 5. Load the value from the element pointer
+                let loaded_val = self
+                    .builder
+                    .build_load(elem_llvm_type, elem_ptr_typed, "load_idx")
+                    .map_err(|e| CodeGenError::LlvmError(format!("Load failed: {}", e), span))?;
+
+                Ok(loaded_val) // Return the loaded element value
+            }
         } // End match expr
     }
 
@@ -1031,11 +1389,95 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         Ok(function)
     }
 
+    // Declare helper for vec_new
+    fn get_or_declare_vec_new(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.vec_new_func {
+            return f;
+        }
+        let i64_t = self.context.i64_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        // takes elem_size (i64), capacity (i64), returns handle (i8*)
+        let fn_type = i8ptr_t.fn_type(&[i64_t.into(), i64_t.into()], false);
+        let func = self
+            .module
+            .add_function(RUNTIME_VEC_NEW, fn_type, Some(Linkage::External));
+        self.vec_new_func = Some(func);
+        func
+    }
+    // Declare helper for vec_get_ptr
+    fn get_or_declare_vec_get_ptr(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.vec_get_ptr_func {
+            return f;
+        }
+        let i64_t = self.context.i64_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        // takes handle (i8*), index (i64), returns element ptr (i8*)
+        let fn_type = i8ptr_t.fn_type(&[i8ptr_t.into(), i64_t.into()], false);
+        let func = self
+            .module
+            .add_function(RUNTIME_VEC_GET_PTR, fn_type, Some(Linkage::External));
+        self.vec_get_ptr_func = Some(func);
+        func
+    }
+
+    fn get_or_declare_vec_len(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.vec_len_func {
+            return f;
+        }
+        let i64_t = self.context.i64_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = i64_t.fn_type(&[i8ptr_t.into()], false); // i8* -> i64
+        let func = self
+            .module
+            .add_function(RUNTIME_VEC_LEN, fn_type, Some(Linkage::External));
+        self.vec_len_func = Some(func);
+        func
+    }
+    fn get_or_declare_vec_push(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.vec_push_func {
+            return f;
+        }
+        let void_t = self.context.void_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        // takes handle (i8*), value_ptr (i8*) -> void
+        let fn_type = void_t.fn_type(&[i8ptr_t.into(), i8ptr_t.into()], false);
+        let func = self
+            .module
+            .add_function(RUNTIME_VEC_PUSH, fn_type, Some(Linkage::External));
+        self.vec_push_func = Some(func);
+        func
+    }
+    fn get_or_declare_vec_free(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.vec_free_func {
+            return f;
+        }
+        let void_t = self.context.void_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = void_t.fn_type(&[i8ptr_t.into()], false); // i8* -> void
+        let func = self
+            .module
+            .add_function(RUNTIME_VEC_FREE, fn_type, Some(Linkage::External));
+        self.vec_free_func = Some(func);
+        func
+    }
+
+    // Get size of a ToyLang Type in bytes (basic implementation)
+    fn get_sizeof(&self, ty: &Type) -> Option<u64> {
+        // This needs target machine data layout ideally! Hardcoding for now. Assumes 64-bit.
+        match ty {
+            Type::Int | Type::Float => Some(8), // i64, f64
+            Type::Bool => Some(1),              // i1 / bool
+            Type::String => Some(8),            // i8* pointer size
+            Type::Vector(_) => Some(8),         // Handle (pointer) size
+            Type::Void => Some(0),              // Or None? Let's use 0.
+        }
+    }
+
     /// Compiles a single Statement node.
     /// Returns Ok(Some(FloatValue)) if it's an ExpressionStmt, Ok(None) for LetBinding, Err on failure.
     /// Compiles a single Statement node. Now runs FPM on function definitions.
     // --- Compile Statement (handles types) ---
-    fn compile_statement(&mut self, stmt: &Statement) -> CompileStmtResult<'ctx> {
+    pub(crate) fn compile_statement(&mut self, stmt: &Statement) -> CompileStmtResult<'ctx> {
         let span = stmt.span.clone();
         match &stmt.kind {
             StatementKind::LetBinding {
@@ -1315,14 +1757,36 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // --- Determine Param and Return Types ---
                 let toy_param_types: Vec<Type> = params
                     .iter()
-                    .map(|(_, opt_ty)| opt_ty.unwrap_or(Type::Float)) // Default Float (improve later)
+                    .map(|param| {
+                        // param.type_ann is Option<Type>
+                        // convert type_ann: TypeNode to Type with type_node_to_type
+                        match &param.1 {
+                            Some(type_node) => Some(type_node_to_type(type_node)),
+                            None => None, // Default to Float if no type annotation
+                        }
+                        .unwrap_or(Type::Void)
+                    })
                     .collect();
-                let toy_return_type = return_type_ann.unwrap_or(Type::Void); // Default Float (improve later)
+                // convert type_ann: TypeNode to Type with type_node_to_type
+                let type_ann = match return_type_ann {
+                    Some(type_node) => Some(type_node_to_type(type_node)),
+                    None => None, // Default to Float if no type annotation
+                };
+                let toy_return_type = type_ann.unwrap_or(Type::Void); // Default Float (improve later)
 
-                let llvm_param_types: Vec<BasicMetadataTypeEnum> = toy_param_types
-                    .iter()
-                    .map(|ty| ty.to_llvm_basic_type(self.context).into())
-                    .collect();
+                let llvm_param_types: Result<Vec<BasicMetadataTypeEnum>, CodeGenError> =
+                    toy_param_types
+                        .iter()
+                        .map(|ty| match ty.to_llvm_basic_type(self.context) {
+                            Some(llvm_type) => Ok(llvm_type.into()),
+                            None => Err(CodeGenError::InvalidType(
+                                "Unsupported parameter type".to_string(),
+                                span.clone(),
+                            )),
+                        })
+                        .collect(); // Collects into Result<Vec<_>, _>
+
+                let llvm_param_types = llvm_param_types?; // Propagate error if any
                 let fn_type = match toy_return_type {
                     Type::Float => self.context.f64_type().fn_type(&llvm_param_types, false),
                     Type::Int => self.context.i64_type().fn_type(&llvm_param_types, false),
@@ -1335,13 +1799,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             .ptr_type(AddressSpace::default())
                             .fn_type(&llvm_param_types, false)
                     } // Add other types like Pointer, Array, Struct later if needed
+                    Type::Vector(_) => {
+                        // Vector is represented as a pointer (i8*)
+                        self.context
+                            .ptr_type(AddressSpace::default())
+                            .fn_type(&llvm_param_types, false)
+                    }
                 };
 
                 let function = self.module.add_function(name, fn_type, None);
                 // Store signature with FunctionValue
                 self.functions.insert(
                     name.clone(),
-                    (toy_param_types.clone(), toy_return_type, function),
+                    (toy_param_types.clone(), toy_return_type.clone(), function),
                 );
 
                 // --- Setup Function Body Context ---
@@ -1349,21 +1819,22 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let original_builder_pos = self.builder.get_insert_block();
                 let original_func = self.current_function;
                 let original_vars = self.variables.clone();
-                let original_ret_type = self.current_function_return_type; // Save outer return type
+                let original_ret_type = self.current_function_return_type.clone(); // Save outer return type
 
                 self.builder.position_at_end(entry_block);
                 self.current_function = Some(function);
-                self.current_function_return_type = Some(toy_return_type); // Set expected return type
+                self.current_function_return_type = Some(toy_return_type.clone()); // Set expected return type
                 self.variables.clear();
 
                 // --- Allocate and Store Parameters (using determined types) ---
                 for (i, (param_name, _)) in params.iter().enumerate() {
-                    let param_toy_type = toy_param_types[i]; // Get the type we determined
+                    let param_toy_type = toy_param_types[i].clone(); // Get the type we determined
                     let llvm_param = function.get_nth_param(i as u32).unwrap();
                     llvm_param.set_name(param_name);
                     // llvm_param should already have the correct LLVM type from fn_type
 
-                    let param_alloca = self.create_entry_block_alloca(param_name, param_toy_type);
+                    let param_alloca =
+                        self.create_entry_block_alloca(param_name, param_toy_type.clone());
                     self.builder.build_store(param_alloca, llvm_param);
                     self.variables.insert(
                         param_name.clone(),
@@ -1455,15 +1926,20 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     fn compile_var_let_stmt(
         &mut self,
         name: &String,
-        type_ann: &Option<Type>,
+        type_ann: &Option<TypeNode>,
         compiled_value: BasicValueEnum,
         is_mutable: bool,
     ) -> CompileStmtResult<'ctx> {
+        // convert type_ann: TypeNode to Type with type_node_to_type
+        let type_ann = match type_ann {
+            Some(type_node) => Some(type_node_to_type(type_node)),
+            None => None, // Default to Float if no type annotation
+        };
         // Determine the type: from annotation or inferred (basic inference for now)
         let var_type = match type_ann {
             Some(ann_ty) => {
                 // TODO: Check if compiled_value type matches ann_ty (or is convertible)
-                *ann_ty
+                ann_ty.clone()
             }
             None => {
                 // Basic inference from value (replace with proper type checker)
@@ -1491,7 +1967,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         };
 
         // Allocate based on determined type
-        let alloca = self.create_entry_block_alloca(name, var_type);
+        let alloca = self.create_entry_block_alloca(name, var_type.clone());
         self.builder.build_store(alloca, compiled_value);
         // Store type info along with pointer
         self.variables.insert(
@@ -1505,96 +1981,6 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         Ok((None, false)) // Let statement yields no value itself
     }
     // End compile_statement
-
-    /// Compile the program into the module, generating a standard C main function
-    /// that calls printf with the result of the last top-level expression.
-    pub fn compile_program_to_module(&mut self, program: &Program) -> Result<(), CodeGenError> {
-        // --- Reset state for this compilation unit ---
-        self.functions.clear(); // Clear user function definitions (printf is handled separately)
-        self.print_float_wrapper_func = None;
-        self.print_int_wrapper_func = None;
-        self.print_bool_wrapper_func = None;
-        self.print_str_wrapper_func = None; // Reset string wrapper cache too
-        self.print_str_ln_wrapper_func = None;
-
-        // --- Declare Printf Early ---
-        // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)
-
-        // --- Define User Functions ---
-        // First pass: Define all user functions so they are available for calls
-        // Need to be careful about compile_statement potentially modifying state needed later
-        // Let's compile functions within the main loop for now, requires functions defined before use.
-        // A multi-pass approach might be better later.
-
-        // --- Setup C-Style Main Function ---
-        let i32_type = self.context.i32_type();
-        // Standard C main signature: int main() (or int main(int argc, char** argv))
-        // We'll use the simple int main() for now.
-        let main_fn_type = i32_type.fn_type(&[], false);
-        let main_function = self.module.add_function(
-            "main", // Standard C entry point name
-            main_fn_type,
-            None, // Default linkage (usually external)
-        );
-        let entry_block = self.context.append_basic_block(main_function, "entry");
-
-        // --- Save/Restore context ---
-        let original_builder_pos = self.builder.get_insert_block();
-        let original_func = self.current_function;
-        let original_vars = self.variables.clone();
-        self.builder.position_at_end(entry_block);
-        self.current_function = Some(main_function);
-        self.variables.clear();
-
-        // --- Compile Top-Level Statements ---
-        // let mut last_main_expr_value: Option<FloatValue<'ctx>> = None;
-        for stmt in &program.statements {
-            self.compile_statement(stmt)?;
-            // match self.compile_statement(stmt)? {
-            //     Some(value) => last_main_expr_value = Some(value),
-            //     None => {} // LetBinding or FunctionDef
-            // }
-        }
-
-        // --- Build Return for C Main (return 0) ---
-        self.builder
-            .build_return(Some(&i32_type.const_int(0, false))); // return 0;
-
-        // --- Restore Compiler State ---
-        // ... (restore variables, current_function, builder position) ...
-        self.variables = original_vars;
-        self.current_function = original_func;
-        if let Some(bb) = original_builder_pos {
-            self.builder.position_at_end(bb);
-        }
-
-        // --- Optimize and Verify Main ---
-        // No need to optimize here if we optimize later or let TargetMachine handle it?
-        // Let's keep the FPM run on main for consistency for now.
-        if main_function.verify(true) {
-            let changed = self.fpm.run_on(&main_function);
-            if changed {
-                println!("Optimizer changed function 'main'");
-            }
-            if !main_function.verify(true) {
-                // Handle verification failure after optimization
-                // unsafe { main_function.delete(); } // No need to delete, just return Err
-                return Err(CodeGenError::LlvmError(
-                    "Main function verification failed after optimization".to_string(),
-                    Span::default(), // Placeholder, should be the actual span of the main function
-                ));
-            }
-        } else {
-            // Handle verification failure before optimization
-            // unsafe { main_function.delete(); }
-            return Err(CodeGenError::LlvmError(
-                "Main function verification failed before optimization".to_string(),
-                Span::default(), // Placeholder, should be the actual span of the main function
-            ));
-        }
-
-        Ok(()) // Module is ready
-    }
 
     /// Emits the compiled module to an object file.
     /// Should be called *after* compile_program_to_module.
@@ -1663,319 +2049,5 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             })?;
 
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::{def, defs};
-    use inkwell::context::Context;
-    use std::path::Path;
-
-    #[test]
-
-    fn compile_float_literal_expression() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        let expr = ExpressionKind::FloatLiteral(5.43);
-        let result = compiler.compile_expression(&def(expr));
-
-        assert!(result.is_ok());
-        assert_eq!(
-            result
-                .unwrap()
-                .into_float_value()
-                .print_to_string()
-                .to_string(),
-            "double 5.430000e+00"
-        );
-    }
-
-    #[test]
-    fn compile_undefined_variable_error() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        let expr = Expression {
-            kind: ExpressionKind::Variable("x".to_string()),
-            span: Default::default(),
-        };
-        let result = compiler.compile_expression(&expr);
-
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            CodeGenError::UndefinedVariable("x".to_string(), Default::default())
-        );
-    }
-
-    #[test]
-    fn compile_binary_operation_with_type_mismatch() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        let expr = def(ExpressionKind::BinaryOp {
-            op: BinaryOperator::Add,
-            left: Box::new(def(ExpressionKind::IntLiteral(5))),
-            right: Box::new(def(ExpressionKind::FloatLiteral(5.43))),
-        });
-
-        let result = compiler.compile_expression(&expr);
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            CodeGenError::InvalidBinaryOperation(_, ..)
-        ));
-    }
-
-    #[test]
-    fn emit_object_file_success() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let compiler = Compiler::new(&context, &builder, &module);
-
-        let output_path = Path::new("test_output.o");
-        let result = compiler.emit_object_file(output_path);
-
-        assert!(result.is_ok());
-        assert!(output_path.exists());
-        std::fs::remove_file(output_path).unwrap();
-    }
-
-    #[test]
-    fn emit_object_file_invalid_path() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let compiler = Compiler::new(&context, &builder, &module);
-
-        let output_path = Path::new("/invalid_path/test_output.o");
-        let result = compiler.emit_object_file(output_path);
-
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            CodeGenError::LlvmError(_, ..)
-        ));
-    }
-
-    #[test]
-    fn compile_function_definition() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        // Create a simple function: function add(a: Int, b: Int) -> Int { a + b }
-        let params = vec![
-            ("a".to_string(), Some(Type::Int)),
-            ("b".to_string(), Some(Type::Int)),
-        ];
-
-        let body = Program {
-            statements: vec![
-                defs(StatementKind::ExpressionStmt(def(
-                    ExpressionKind::BinaryOp {
-                        op: BinaryOperator::Add,
-                        left: Box::new(def(ExpressionKind::Variable("a".to_string()))),
-                        right: Box::new(def(ExpressionKind::Variable("b".to_string()))),
-                    },
-                ))),
-                defs(StatementKind::ReturnStmt {
-                    value: Some(def(*Box::new(ExpressionKind::Variable("a".to_string())))),
-                }),
-            ],
-            span: Default::default(),
-        };
-
-        let func_def = StatementKind::FunctionDef {
-            name: "add".to_string(),
-            params,
-            return_type_ann: Some(Type::Int),
-            body,
-        };
-
-        // Compile the function definition
-        let result = compiler.compile_statement(&defs(func_def));
-
-        // Verify compilation succeeded
-        assert!(result.is_ok());
-
-        // Check that the function was added to the compiler's function map
-        assert!(compiler.functions.contains_key("add"));
-
-        // Verify the function signature is correct
-        let (param_types, return_type, _) = compiler.functions.get("add").unwrap();
-        assert_eq!(param_types.len(), 2);
-        assert_eq!(param_types[0], Type::Int);
-        assert_eq!(param_types[1], Type::Int);
-        assert_eq!(*return_type, Type::Int);
-    }
-
-    #[test]
-    fn compile_function_with_explicit_int_return() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-        // Create a function: fun returns_int(): int { return 10; }
-        let body = Program {
-            statements: vec![defs(StatementKind::ReturnStmt {
-                value: Some(def(*Box::new(ExpressionKind::IntLiteral(10)))),
-            })],
-            span: Default::default(),
-        };
-
-        let func_def = StatementKind::FunctionDef {
-            name: "returns_int".to_string(),
-            params: vec![],
-            return_type_ann: Some(Type::Int),
-            body,
-        };
-
-        // Compile the function definition
-        let result = compiler.compile_statement(&defs(func_def));
-        assert!(result.is_ok());
-
-        // Verify the function signature has the correct return type
-        let (_, return_type, _) = compiler.functions.get("returns_int").unwrap();
-        assert_eq!(*return_type, Type::Int);
-    }
-
-    #[test]
-    fn compile_function_with_explicit_float_return() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        // Create a function: fun returns_float(): float { return 3.14; }
-        let body = Program {
-            statements: vec![defs(StatementKind::ReturnStmt {
-                value: Some(def(ExpressionKind::FloatLiteral(3.20))),
-            })],
-            span: Default::default(),
-        };
-
-        let func_def = defs(StatementKind::FunctionDef {
-            name: "returns_float".to_string(),
-            params: vec![],
-            return_type_ann: Some(Type::Float),
-            body,
-        });
-
-        // Compile the function definition
-        let result = compiler.compile_statement(&func_def);
-        assert!(result.is_ok());
-
-        // Verify the function signature has the correct return type
-        let (_, return_type, _) = compiler.functions.get("returns_float").unwrap();
-        assert_eq!(*return_type, Type::Float);
-    }
-
-    #[test]
-    fn compile_function_with_explicit_bool_return() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        // Create a function: fun returns_bool(): bool { return true; }
-        let body = Program {
-            statements: vec![defs(StatementKind::ReturnStmt {
-                value: Some(def(ExpressionKind::BoolLiteral(true))),
-            })],
-            span: Default::default(),
-        };
-
-        let func_def = defs(StatementKind::FunctionDef {
-            name: "returns_bool".to_string(),
-            params: vec![],
-            return_type_ann: Some(Type::Bool),
-            body,
-        });
-
-        // Compile the function definition
-        let result = compiler.compile_statement(&func_def);
-        assert!(result.is_ok());
-
-        // Verify the function signature has the correct return type
-        let (_, return_type, _) = compiler.functions.get("returns_bool").unwrap();
-        assert_eq!(*return_type, Type::Bool);
-    }
-
-    #[test]
-    fn compile_function_with_explicit_void_return() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        // Create a function: fun returns_void(): void { return; }
-        let body = Program {
-            statements: vec![defs(StatementKind::ReturnStmt { value: None })],
-            span: Default::default(),
-        };
-
-        let func_def = defs(StatementKind::FunctionDef {
-            name: "returns_void".to_string(),
-            params: vec![],
-            return_type_ann: Some(Type::Void),
-            body,
-        });
-
-        // Compile the function definition
-        let result = compiler.compile_statement(&func_def);
-        assert!(result.is_ok());
-
-        // Verify the function signature has the correct return type
-        let (_, return_type, _) = compiler.functions.get("returns_void").unwrap();
-        assert_eq!(*return_type, Type::Void);
-    }
-
-    #[test]
-    fn compile_function_with_implicit_void_return() {
-        let context = Context::create();
-        let module = context.create_module("test");
-        let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
-
-        // Create a function: fun implicit_void(): void { print_str("Implicit void"); }
-        let body = Program {
-            statements: vec![defs(StatementKind::ExpressionStmt(def(
-                ExpressionKind::FunctionCall {
-                    name: "print_str".to_string(),
-                    args: vec![def(ExpressionKind::StringLiteral(
-                        "Implicit void".to_string(),
-                    ))],
-                },
-            )))],
-            span: Default::default(),
-        };
-
-        let func_def = defs(StatementKind::FunctionDef {
-            name: "implicit_void".to_string(),
-            params: vec![],
-            return_type_ann: Some(Type::Void),
-            body,
-        });
-
-        // Compile the function definition
-        let result = compiler.compile_statement(&func_def);
-        assert!(result.is_ok());
-
-        // Verify the function signature has the correct return type
-        let (_, return_type, _) = compiler.functions.get("implicit_void").unwrap();
-        assert_eq!(*return_type, Type::Void);
     }
 }

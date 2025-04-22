@@ -57,7 +57,9 @@ pub enum TokenKind {
     Comma,     // ','
     LBrace,    // '{'
     RBrace,    // '}'
-    Colon,     // ':' //  for type annotations (e.g., let x: int)
+    Colon,     // ':' // for type annotations (e.g., let x: int)
+    LBracket, // '[' // Added for indexing & literals
+    RBracket, // ']' // Added
 
     // Keywords
     Let,    // 'let'

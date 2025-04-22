@@ -1,11 +1,13 @@
 // src/typechecker.rs
 
-use crate::ast::{ComparisonOperator, Expression, ExpressionKind, Program, Statement, StatementKind, UnaryOperator};
+use crate::ast::{
+    ComparisonOperator, Expression, ExpressionKind, Program, Statement, StatementKind, TypeNode,
+    TypeNodeKind, UnaryOperator,
+};
 use crate::location::{Location, Span};
 use crate::symbol_table::{FunctionSignature, SymbolInfo, SymbolTable};
 use crate::types::Type;
 use std::fmt;
-use std::fmt::write;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeError {
@@ -53,7 +55,19 @@ pub enum TypeError {
     UnknownTypeName(String, Location), // Location of type name identifier
     ReturnVoidFromNonVoid(Type, Span), // Span of return statement
     ReturnValueFromVoid(Span),
-    ReturnTypeMismatch { expected: Type, found: Type, span: Span }, // Span of return statement
+    ReturnTypeMismatch {
+        expected: Type,
+        found: Type,
+        span: Span,
+    }, // Span of return statement
+    NotAVector(Type, Span),      // Tried to index non-vector
+    IndexNotInteger(Type, Span), // Index expr not int
+    VectorElementTypeMismatch {
+        expected: Type,
+        found: Type,
+        span: Span,
+    }, // In literal or assignment
+    CannotInferVectorType(Span), // e.g., for empty literal []
 }
 // src/typechecker.rs
 impl fmt::Display for TypeError {
@@ -72,8 +86,16 @@ impl fmt::Display for TypeError {
                 "{} Type mismatch in {}: expected {}, found {}",
                 span, context, expected, found
             ),
-            TypeError::VariableRedefinition { name, new_loc, prev_loc } => {
-                write!(f, "{} Variable '{}' redefined in this scope, first definition at {}", new_loc, name, prev_loc)
+            TypeError::VariableRedefinition {
+                name,
+                new_loc,
+                prev_loc,
+            } => {
+                write!(
+                    f,
+                    "{} Variable '{}' redefined in this scope, first definition at {}",
+                    new_loc, name, prev_loc
+                )
             }
             TypeError::FunctionRedefinition { name, new_loc, .. } => {
                 write!(f, "{} Function '{}' redefined", new_loc, name)
@@ -91,8 +113,16 @@ impl fmt::Display for TypeError {
                 "{} Function '{}' called with {} arguments, expected {}",
                 call_site, func_name, found, expected
             ),
-            TypeError::InvalidOperation { op, type_info, span } => {
-                write!(f, "{} Invalid operation '{}' for type(s) {}", span, op, type_info)
+            TypeError::InvalidOperation {
+                op,
+                type_info,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{} Invalid operation '{}' for type(s) {}",
+                    span, op, type_info
+                )
             }
             TypeError::MissingReturnValue(fname, span) => write!(
                 f,
@@ -115,22 +145,88 @@ impl fmt::Display for TypeError {
                 write!(f, "{} Invalid target for assignment: {}", span, target)
             }
             TypeError::VoidAssignment(name, span) => {
-                write!(f, "{} Cannot assign void value to variable '{}'", span, name)
+                write!(
+                    f,
+                    "{} Cannot assign void value to variable '{}'",
+                    span, name
+                )
             }
-            TypeError::PrintArgError(msg, span) => write!(f, "{} Built-in print error: {}", span, msg),
-            TypeError::UnknownTypeName(name, loc) => write!(f, "{} Unknown type name '{}'", loc, name),
+            TypeError::PrintArgError(msg, span) => {
+                write!(f, "{} Built-in print error: {}", span, msg)
+            }
+            TypeError::UnknownTypeName(name, loc) => {
+                write!(f, "{} Unknown type name '{}'", loc, name)
+            }
             TypeError::UndefinedFunction(name, span) => {
                 write!(f, "{} Undefined function '{}'", span, name)
             }
             TypeError::ReturnVoidFromNonVoid(expected_type, span) => {
-                write!(f, "{} Cannot return void from non-void function, expected {}", span, expected_type)
-            },
-            TypeError::ReturnValueFromVoid(span)  => {
+                write!(
+                    f,
+                    "{} Cannot return void from non-void function, expected {}",
+                    span, expected_type
+                )
+            }
+            TypeError::ReturnValueFromVoid(span) => {
                 write!(f, "{} Cannot return a value from a void function", span)
             }
-            TypeError::ReturnTypeMismatch { expected, found, span } => {
-                write!(f, "{} Return type mismatch: expected {}, found {}", span, expected, found)
+            TypeError::ReturnTypeMismatch {
+                expected,
+                found,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{} Return type mismatch: expected {}, found {}",
+                    span, expected, found
+                )
             }
+            TypeError::NotAVector(ty, span) => {
+                write!(f, "{} Not a vector type: {}", span, ty)
+            }
+            TypeError::IndexNotInteger(ty, span) => {
+                write!(f, "{} Index must be an integer, found {}", span, ty)
+            }
+            TypeError::VectorElementTypeMismatch {
+                expected,
+                found,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{} Vector element type mismatch: expected {}, found {}",
+                    span, expected, found
+                )
+            }
+            TypeError::CannotInferVectorType(span) => {
+                write!(f, "{} Cannot infer vector type from empty literal", span)
+            }
+        }
+    }
+}
+
+// Helper to resolve Type AST to internal Type enum
+fn resolve_type_node(node: &TypeNode, errors: &mut Vec<TypeError>) -> Option<Type> {
+    match &node.kind {
+        TypeNodeKind::Simple(name) => {
+            match name.as_str() {
+                "int" => Some(Type::Int),
+                "float" => Some(Type::Float),
+                "bool" => Some(Type::Bool),
+                "string" => Some(Type::String), // Handle string type name
+                "void" => Some(Type::Void),
+                _ => {
+                    errors.push(TypeError::UnknownTypeName(
+                        name.clone(),
+                        node.span.start.clone(),
+                    ));
+                    None
+                }
+            }
+        }
+        TypeNodeKind::Vector(element_node) => {
+            // Recursively resolve element type
+            resolve_type_node(element_node, errors).map(|t| Type::Vector(Box::new(t)))
         }
     }
 }
@@ -168,12 +264,21 @@ impl TypeChecker {
                 ..
             } = &statement.kind
             {
-                // Basic type resolution (replace with better handling)
-                let param_types: Vec<Type> = params
-                    .iter()
-                    .map(|(_, opt_ty)| opt_ty.unwrap_or(Type::Float)) // Default BAD
-                    .collect();
-                let return_type = return_type_ann.unwrap_or(Type::Float); // Default BAD
+                // type resolution
+                let param_types: Vec<Type> =
+                    params
+                        .iter()
+                        .map(|(_, opt_node)| {
+                            opt_node
+                                .as_ref()
+                                .and_then(|n| resolve_type_node(n, &mut self.errors))
+                        })
+                        .collect::<Option<Vec<Type>>>() // Collects Option<Type>, fails if any param type is None
+                        .unwrap_or_else(|| vec![]); // Default empty vector if resolution failed
+                let return_type = return_type_ann
+                    .as_ref()
+                    .and_then(|n| resolve_type_node(n, &mut self.errors))
+                    .unwrap_or(Type::Void); // Default to Void if resolution failed
                 let signature = FunctionSignature {
                     param_types,
                     return_type,
@@ -217,14 +322,14 @@ impl TypeChecker {
                 type_ann,
                 value,
             } => {
-                self.check_binding(name, type_ann, value, false); // is_mutable = false
+                self.check_binding(name, type_ann, value, false, span); // is_mutable = false
             }
             StatementKind::VarBinding {
                 name,
                 type_ann,
                 value,
             } => {
-                self.check_binding(name, type_ann, value, true); // is_mutable = true
+                self.check_binding(name, type_ann, value, true, span); // is_mutable = true
             }
             StatementKind::IfStmt {
                 condition,
@@ -278,7 +383,10 @@ impl TypeChecker {
                 if let Some(cond_expr) = condition {
                     match self.check_expression(cond_expr) {
                         Some(Type::Bool) | None => {} // Allow None if error during check
-                        Some(other) => self.errors.push(TypeError::InvalidConditionType(other, cond_expr.span.clone())),
+                        Some(other) => self.errors.push(TypeError::InvalidConditionType(
+                            other,
+                            cond_expr.span.clone(),
+                        )),
                     }
                 }
                 // Check increment *after* body check? Doesn't matter much here.
@@ -296,7 +404,7 @@ impl TypeChecker {
                 body,
             } => {
                 // Signature already collected in first pass. Now check the body.
-                let signature  = self.symbol_table.lookup_function(name).cloned(); // Clone to satisfy borrow checker
+                let signature = self.symbol_table.lookup_function(name).cloned(); // Clone to satisfy borrow checker
                 if signature.is_none() {
                     return;
                 } // Skip body check if definition failed
@@ -307,11 +415,24 @@ impl TypeChecker {
                     .current_function_return_type
                     .replace(signature.return_type);
 
+                // Resolve param/return types from TypeNodes
+                let param_types_result: Option<Vec<Type>> = params
+                    .iter()
+                    .map(|(_, opt_node)| {
+                        opt_node
+                            .as_ref()
+                            .and_then(|n| resolve_type_node(n, &mut self.errors))
+                    })
+                    .collect(); // Collects Option<Type>, fails if any param type is None
+                let return_type_result: Option<Type> = return_type_ann
+                    .as_ref()
+                    .and_then(|n| resolve_type_node(n, &mut self.errors));
+
                 // Define parameters in the new scope
                 for (i, (p_name, _)) in params.iter().enumerate() {
                     if i < signature.param_types.len() {
                         // Check bounds
-                        let param_type = signature.param_types[i]; 
+                        let param_type = signature.param_types[i].clone();
                         let info = SymbolInfo {
                             ty: param_type,
                             is_mutable: false,
@@ -327,17 +448,39 @@ impl TypeChecker {
                     }
                 }
 
-                // Check the body statements
-                self.check_program_block(body); // Check body, collect errors
-
-                // TODO: Check return value consistency within body - complex!
-
-                self.current_function_return_type = original_return_type;
-                self.symbol_table.exit_scope();
+                // Use defaults only if resolution failed AND annotation was None? Needs thought.
+                // For now, proceed only if all types resolved.
+                if let (Some(param_types), Some(return_type)) =
+                    (param_types_result, return_type_result.or(Some(Type::Void)))
+                {
+                    // Default return void if None? Or error? Default Void.
+                    let signature = FunctionSignature {
+                        param_types,
+                        return_type,
+                        def_span: statement.span.clone(),
+                    };
+                    if self.symbol_table.lookup_function(name).is_none() {
+                        // Define only if not already defined (first pass might have failed)
+                        if let Err(e) = self.symbol_table.define_function(name, signature.clone()) {
+                            self.errors.push(TypeError::FunctionRedefinition {
+                                name: name.clone(),
+                                new_loc: statement.span.clone(),
+                                prev_loc: e,
+                            });
+                        }
+                    }
+                    // Check body... (pass resolved signature down if needed)
+                    self.symbol_table.enter_scope();
+                    self.current_function_return_type = Some(signature.return_type);
+                    // Define params with resolved types...
+                    self.check_program_block(body);
+                    self.symbol_table.exit_scope();
+                    self.current_function_return_type = None; // Restore
+                }
             }
             StatementKind::ReturnStmt { value } => {
                 // Check context: Must be inside a function
-                let Some(expected_ret_type) = self.current_function_return_type else {
+                let Some(expected_ret_type) = self.current_function_return_type.clone() else {
                     self.errors.push(TypeError::InvalidOperation {
                         op: "return".to_string(),
                         type_info: "Cannot return from top-level code".to_string(),
@@ -387,71 +530,82 @@ impl TypeChecker {
     }
 
     // Helper for LetBinding and VarBinding - pushes errors
-    // todo: currently the value is used for the def_span. make it such that the whole stmt is used for the def_span. because 
-    // then the errors get more usable imo
     fn check_binding(
         &mut self,
         name: &str,
-        type_ann: &Option<Type>,
+        type_ann_node: &Option<TypeNode>,
         value: &Expression,
         is_mutable: bool,
+        stmt_span: Span,
     ) {
         let Some(value_type) = self.check_expression(value) else {
             return;
-        }; // Check value first
+        };
+        if value_type == Type::Void {
+            // Cannot infer variable type from void
+            self.errors.push(TypeError::VoidAssignment(
+                name.to_string(),
+                value.span.clone(),
+            ));
+            return;
+        }
 
-        // Determine expected type
-        let expected_type = match type_ann {
-            Some(ann) => {
-                if value_type == Type::Void {
-                    // Cannot assign void
-                    self.errors
-                        .push(TypeError::VoidAssignment(name.to_string(), value.span.clone()));
-                    return; // Stop checking this binding
-                }
-                if value_type != *ann {
+        // Resolve annotation type
+        let annotation_type: Option<Type> = type_ann_node
+            .as_ref()
+            .and_then(|node| resolve_type_node(node, &mut self.errors)); // Resolve TypeNode
+
+        // Determine expected type & check match
+        let expected_type = match annotation_type {
+            Some(ann_ty) => {
+                // Check if value type matches annotation
+                // TODO: Handle vector literal type inference/checking against annotation
+                if value_type != ann_ty
+                    && !self.check_vector_literal_assignment(&value_type, &ann_ty)
+                {
                     self.errors.push(TypeError::TypeMismatch {
-                        expected: *ann,
-                        found: value_type,
-                        context: format!("binding of '{}'", name),
+                        expected: ann_ty.clone(),
+                        found: value_type.clone(),
+                        context: format!("variable '{}'", name),
                         span: value.span.clone(),
                     });
-                    // Use annotation type even if mismatch, allows defining variable
                 }
-                *ann
+                ann_ty
             }
-            None => {
-                // Infer from value
-                if value_type == Type::Void {
-                    // Cannot infer variable type from void
-                    self.errors
-                        .push(TypeError::VoidAssignment(name.to_string(), value.span.clone()));
-                    return;
-                }
-                value_type
-            }
+            None => value_type, // Infer from value
         };
 
-        // Define variable in current scope
+        // Define variable
         let info = SymbolInfo {
             ty: expected_type,
             is_mutable,
-            def_span: value.span.clone(),
+            def_span: stmt_span.clone(),
         };
         if let Err(e) = self.symbol_table.define_variable(name, info) {
             self.errors.push(TypeError::VariableRedefinition {
                 name: name.to_string(),
-                new_loc: value.span.clone(),
+                new_loc: stmt_span,
                 prev_loc: e,
             });
         }
+    }
+
+    // Helper to check if value_type (potentially Vector(Unknown)) can be assigned to ann_ty (Vector(T))
+    // Placeholder - needs proper inference for vector literals.
+    fn check_vector_literal_assignment(&self, value_type: &Type, ann_ty: &Type) -> bool {
+        // Basic check: if annotation is vec<T>, value must be compatible vec
+        // This needs the check_expression for VectorLiteral to potentially return a special
+        // type like Vector(Unknown) or Vector(Inferred(T)) if elements are consistent.
+        // For now, assume check_expression infers correctly.
+        // todo fix
+        value_type == ann_ty
     }
 
     /// Check an expression and return its determined Type or None if error.
     /// Errors are pushed to self.errors.
     fn check_expression(&mut self, expression: &Expression) -> Option<Type> {
         let span = expression.span.clone();
-        match &expression.kind {
+        let maybe_type: Option<Type> = match &expression.kind {
             // ... Literals, Variable (use symbol_table.lookup_variable) ...
             ExpressionKind::FloatLiteral(_) => Some(Type::Float),
             ExpressionKind::IntLiteral(_) => Some(Type::Int),
@@ -459,9 +613,10 @@ impl TypeChecker {
             ExpressionKind::Variable(name) => {
                 self.symbol_table
                     .lookup_variable(name)
-                    .map(|info| info.ty) // Return the found type
+                    .map(|info| info.ty.clone()) // Return the found type
                     .or_else(|| {
-                        self.errors.push(TypeError::UndefinedVariable(name.clone(), span));
+                        self.errors
+                            .push(TypeError::UndefinedVariable(name.clone(), span));
                         None
                     })
             }
@@ -474,7 +629,8 @@ impl TypeChecker {
                             .push(TypeError::UndefinedVariable(target.clone(), span));
                         return None;
                     }
-                }.clone();
+                }
+                .clone();
                 if !target_info.is_mutable {
                     self.errors
                         .push(TypeError::AssignmentToImmutable(target.clone(), span));
@@ -489,7 +645,8 @@ impl TypeChecker {
                     return None;
                 };
                 if value_type == Type::Void {
-                    self.errors.push(TypeError::VoidAssignment(target.clone(), span));
+                    self.errors
+                        .push(TypeError::VoidAssignment(target.clone(), span));
                     return None;
                 }
                 if target_info.ty != value_type {
@@ -497,7 +654,7 @@ impl TypeChecker {
                         expected: target_info.ty,
                         found: value_type,
                         context: format!("assignment to '{}'", target),
-                        span
+                        span,
                     });
                     return None; // Assignment fails type check
                 }
@@ -514,7 +671,7 @@ impl TypeChecker {
                         self.errors.push(TypeError::InvalidOperation {
                             op: format!("{:?}", op),
                             type_info: format!("{} and {}", lt, rt),
-                            span
+                            span,
                         });
                         None
                     }
@@ -540,7 +697,7 @@ impl TypeChecker {
                         self.errors.push(TypeError::InvalidOperation {
                             op: format!("{:?}", op),
                             type_info: format!("{} and {}", lt, rt),
-                            span
+                            span,
                         });
                         None
                     }
@@ -557,7 +714,7 @@ impl TypeChecker {
                         self.errors.push(TypeError::InvalidOperation {
                             op: format!("{:?}", op),
                             type_info: format!("{}", other),
-                            span
+                            span,
                         });
                         None
                     }
@@ -593,19 +750,35 @@ impl TypeChecker {
                     match self.symbol_table.lookup_function(name).cloned() {
                         // Clone sig
                         Some(signature) => {
-                            if args.len() != signature.param_types.len() { /* Error */ }
+                            if args.len() != signature.param_types.len() { 
+                                // Error: incorrect arg count
+                                self.errors.push(TypeError::IncorrectArgCount {
+                                    func_name: name.clone(),
+                                    expected: signature.param_types.len(),
+                                    found: args.len(),
+                                    call_site: span,
+                                });
+                            }
                             // Check arg types
                             for i in 0..std::cmp::min(args.len(), signature.param_types.len()) {
                                 let Some(arg_type) = self.check_expression(&args[i]) else {
                                     continue;
                                 };
-                                let expected = signature.param_types[i];
-                                if arg_type != expected { /* Error */ }
+                                let expected = signature.param_types[i].clone();
+                                if arg_type != expected {
+                                    self.errors.push(TypeError::TypeMismatch {
+                                        expected: expected.clone(),
+                                        found: arg_type,
+                                        context: format!("argument {} of function '{}'", i + 1, name),
+                                        span: args[i].span.clone(),
+                                    });
+                                }
                             }
                             Some(signature.return_type)
                         }
                         None => {
-                            self.errors.push(TypeError::UndefinedFunction(name.clone(), span));
+                            self.errors
+                                .push(TypeError::UndefinedFunction(name.clone(), span));
                             None
                         }
                     }
@@ -619,7 +792,8 @@ impl TypeChecker {
                 match self.check_expression(condition) {
                     Some(Type::Bool) => {} // OK
                     Some(other) => {
-                        self.errors.push(TypeError::InvalidConditionType(other, span.clone()));
+                        self.errors
+                            .push(TypeError::InvalidConditionType(other, span.clone()));
                         /* Fallthrough to check branches */
                     }
                     None => {} // Error checking condition already recorded
@@ -659,11 +833,86 @@ impl TypeChecker {
                 self.symbol_table.exit_scope();
                 block_type
             }
+            ExpressionKind::VectorLiteral { elements } => {
+                if elements.is_empty() {
+                    // Cannot infer type of empty literal without context
+                    self.errors.push(TypeError::CannotInferVectorType(span));
+                    return None; // Or return special Vector(Unknown)? Let's use None.
+                }
+                // Check all elements, infer type from first, check consistency
+                let first_elem_type_opt = self.check_expression(&elements[0]);
+                let Some(elem_type) = first_elem_type_opt else {
+                    return None;
+                }; // Error in first element
+
+                // Cannot have void elements
+                if elem_type == Type::Void {
+                    self.errors.push(TypeError::InvalidOperation {
+                        op: "vector literal".into(),
+                        type_info: "void elements".into(),
+                        span,
+                    });
+                    return None;
+                }
+
+                for element_expr in elements.iter().skip(1) {
+                    let current_elem_type_opt = self.check_expression(element_expr);
+                    match current_elem_type_opt {
+                        Some(current_type) if current_type == elem_type => { /* OK */ }
+                        Some(mismatch_type) => {
+                            self.errors.push(TypeError::VectorElementTypeMismatch {
+                                expected: elem_type,
+                                found: mismatch_type,
+                                span: element_expr.span.clone(),
+                            });
+                            return None; // Stop on first mismatch
+                        }
+                        None => return None, // Error in subsequent element
+                    }
+                }
+                // All elements checked and match the first element's type
+                Some(Type::Vector(Box::new(elem_type)))
+            }
+            // --- Index Access ---
+            ExpressionKind::IndexAccess { target, index } => {
+                let target_type_opt = self.check_expression(target); // Check target first
+                let index_type_opt = self.check_expression(index); // Check index
+
+                // Ensure index is Int
+                if let Some(it) = index_type_opt {
+                    if it != Type::Int {
+                        self.errors.push(TypeError::IndexNotInteger(it, index.span.clone()));
+                    }
+                } // else: error already recorded in index check
+
+                // --- Use resolved type of TARGET ---
+                match target_type_opt {
+                    Some(Type::Vector(elem_type)) => {
+                        // Target is Vector, result is element type
+                        Some(*elem_type) // Deref Box<Type>
+                    }
+                    // Add String indexing later?
+                    // Some(Type::String) => Some(Type::Char) // Hypothetical
+                    Some(other_type) => {
+                        // Target is not a vector (or string)
+                        self.errors.push(TypeError::NotAVector(other_type, target.span.clone()));
+                        None
+                    }
+                    None => None, // Error checking target
+                }
+            } // End IndexAccess
             _ => unimplemented!(
                 "Type checking not implemented for this expression node yet: {:?}",
                 expression
             ),
+        };
+        // --- Annotation ---
+        // If we successfully determined a type, store it in the AST node
+        if let Some(ty) = maybe_type.clone() {
+            expression.set_type(ty); // Use helper to set type in RefCell
         }
+
+        maybe_type // Return the determined type (or None if error occurred)
     } // End check_expression
 
     // Helper to check blocks used inside statements like IfStmt, WhileStmt, ForStmt
