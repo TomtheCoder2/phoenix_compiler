@@ -1,10 +1,10 @@
 use inkwell::context::Context;
 use std::path::Path;
-use toylang_compiler::codegen::Compiler;
-use toylang_compiler::lexer::Lexer;
-use toylang_compiler::parser::Parser;
-use toylang_compiler::typechecker::TypeChecker;
-use toylang_compiler::utils::link_object_file;
+use phoenix_compiler::codegen::Compiler;
+use phoenix_compiler::lexer::Lexer;
+use phoenix_compiler::parser::Parser;
+use phoenix_compiler::typechecker::TypeChecker;
+use phoenix_compiler::utils::link_object_file;
 // Add import
 
 // Remove JIT type alias if not used

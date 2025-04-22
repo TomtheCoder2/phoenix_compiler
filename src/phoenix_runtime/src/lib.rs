@@ -43,9 +43,9 @@ pub unsafe extern "C" fn print_str_wrapper(c_string_ptr: *const c_char) {
     // No need to flush usually, println! does.
 }
 
-// The internal representation of a ToyLang vector handle
+// The internal representation of a phoenix vector handle
 #[repr(C)] // Ensure predictable layout for C interop
-struct ToyLangVec {
+struct phoenixVec {
     capacity: i64,  // Number of elements allocated
     length: i64,    // Number of elements currently stored
     elem_size: i64, // Size of each element in bytes
@@ -59,9 +59,9 @@ fn data_layout(elem_size: i64, capacity: i64) -> Option<Layout> {
     // Might need adjustment for complex types later
 }
 
-// fn(elem_size: i64, capacity: i64) -> *mut ToyLangVec (as *mut c_void / i8*)
+// fn(elem_size: i64, capacity: i64) -> *mut phoenixVec (as *mut c_void / i8*)
 #[no_mangle]
-pub extern "C" fn _toylang_vec_new(elem_size: i64, capacity: i64) -> *mut libc::c_void {
+pub extern "C" fn _phoenix_vec_new(elem_size: i64, capacity: i64) -> *mut libc::c_void {
     if elem_size <= 0 || capacity < 0 {
         eprintln!("RUNTIME ERROR: Invalid size/capacity for vec_new");
         return ptr::null_mut(); // Return null on error
@@ -87,7 +87,7 @@ pub extern "C" fn _toylang_vec_new(elem_size: i64, capacity: i64) -> *mut libc::
     }
 
     // Allocate header struct on the heap using Box, then leak it to get a stable pointer
-    let header = Box::new(ToyLangVec {
+    let header = Box::new(phoenixVec {
         capacity,
         length: capacity, // We assume that the vector is initialized with the given capacity // todo maybe specify an argument initial length
         elem_size,
@@ -100,14 +100,14 @@ pub extern "C" fn _toylang_vec_new(elem_size: i64, capacity: i64) -> *mut libc::
 
 // fn(vec_handle: *mut c_void / i8*)
 #[no_mangle]
-pub extern "C" fn _toylang_vec_free(handle: *mut libc::c_void) {
+pub extern "C" fn _phoenix_vec_free(handle: *mut libc::c_void) {
     if handle.is_null() {
         return;
     } // Do nothing if null
 
     unsafe {
         // Reconstruct the Box from the raw pointer TO TAKE OWNERSHIP BACK
-        let header_box = Box::from_raw(handle as *mut ToyLangVec);
+        let header_box = Box::from_raw(handle as *mut phoenixVec);
 
         // Deallocate the data buffer if it was allocated
         if header_box.capacity > 0 && !header_box.data.is_null() {
@@ -124,22 +124,22 @@ pub extern "C" fn _toylang_vec_free(handle: *mut libc::c_void) {
 
 // fn(vec_handle: *mut c_void / i8*) -> i64
 #[no_mangle]
-pub extern "C" fn _toylang_vec_len(handle: *mut libc::c_void) -> i64 {
+pub extern "C" fn _phoenix_vec_len(handle: *mut libc::c_void) -> i64 {
     if handle.is_null() {
         return -1;
     } // Indicate error? Or 0? Let's use -1.
-    let header = unsafe { &*(handle as *const ToyLangVec) }; // Borrow header immutably
+    let header = unsafe { &*(handle as *const phoenixVec) }; // Borrow header immutably
     header.length
 }
 
 // fn(vec_handle: *mut c_void / i8*, index: i64) -> *mut c_void / i8* (pointer to element)
 #[no_mangle]
-pub extern "C" fn _toylang_vec_get_ptr(handle: *mut libc::c_void, index: i64) -> *mut libc::c_void {
+pub extern "C" fn _phoenix_vec_get_ptr(handle: *mut libc::c_void, index: i64) -> *mut libc::c_void {
     if handle.is_null() {
         eprintln!("RUNTIME ERROR: Null handle passed to vec_get_ptr");
         return ptr::null_mut();
     }
-    let header = unsafe { &*(handle as *const ToyLangVec) }; // Borrow header
+    let header = unsafe { &*(handle as *const phoenixVec) }; // Borrow header
 
     // --- Bounds Check --- (Essential!)
     if index < 0 || index >= header.length {
@@ -159,13 +159,13 @@ pub extern "C" fn _toylang_vec_get_ptr(handle: *mut libc::c_void, index: i64) ->
 
 // fn(vec_handle: *mut c_void / i8*, value_ptr: *const c_void / i8*) -> void
 #[no_mangle]
-pub extern "C" fn _toylang_vec_push(handle: *mut libc::c_void, value_ptr: *const libc::c_void) {
+pub extern "C" fn _phoenix_vec_push(handle: *mut libc::c_void, value_ptr: *const libc::c_void) {
     if handle.is_null() || value_ptr.is_null() {
         eprintln!("RUNTIME ERROR: Null handle or value passed to vec_push");
         return;
     }
 
-    let header = unsafe { &mut *(handle as *mut ToyLangVec) }; // Need mutable header
+    let header = unsafe { &mut *(handle as *mut phoenixVec) }; // Need mutable header
 
     // --- Resize / Reallocate if needed ---
     if header.length >= header.capacity {

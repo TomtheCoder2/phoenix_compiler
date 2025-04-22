@@ -201,8 +201,8 @@ impl Expression {
 /// # Example
 ///
 /// ```rust
-/// use toylang_compiler::ast::{ExpressionKind, def};
-/// use toylang_compiler::location::Span;
+/// use phoenix_compiler::ast::{ExpressionKind, def};
+/// use phoenix_compiler::location::Span;
 ///
 /// let expr_kind = ExpressionKind::IntLiteral(42);
 /// let expression = def(expr_kind);

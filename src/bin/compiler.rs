@@ -2,16 +2,16 @@ use clap::Parser;
 use inkwell::context::Context;
 use std::fs;
 use std::path::Path;
-use toylang_compiler::codegen::Compiler;
-use toylang_compiler::lexer::Lexer;
-use toylang_compiler::parser::Parser as ToyParser;
-use toylang_compiler::typechecker::TypeChecker;
-use toylang_compiler::utils::link_object_file;
+use phoenix_compiler::codegen::Compiler;
+use phoenix_compiler::lexer::Lexer;
+use phoenix_compiler::parser::Parser as ToyParser;
+use phoenix_compiler::typechecker::TypeChecker;
+use phoenix_compiler::utils::link_object_file;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "ToyLang Compiler")]
+#[command(author, version, about = "phoenix Compiler")]
 struct Args {
-    /// Input file containing ToyLang code
+    /// Input file containing phoenix code
     #[arg(short, long)]
     input: String,
 

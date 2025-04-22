@@ -1,11 +1,11 @@
 [package]
-name = "toylang_runtime"
+name = "phoenix_runtime"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
 crate-type = ["staticlib"] # Compile as a static library
-name = "toylang_runtime"
+name = "phoenix_runtime"
 
 [dependencies]
 libc = "1.0.0-alpha.1"

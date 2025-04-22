@@ -25,11 +25,11 @@ use std::ffi::CString;
 use std::fmt;
 use std::path::Path;
 
-const RUNTIME_VEC_NEW: &str = "_toylang_vec_new"; // fn(elem_size: i64, capacity: i64) -> i8*
-const RUNTIME_VEC_GET_PTR: &str = "_toylang_vec_get_ptr"; // fn(vec_handle: i8*, index: i64) -> i8* (pointer to element)
-const RUNTIME_VEC_LEN: &str = "_toylang_vec_len"; // fn(vec_handle: i8*) -> i64
-const RUNTIME_VEC_PUSH: &str = "_toylang_vec_push"; // fn(vec_handle: i8*, value_ptr: i8*) -> void
-const RUNTIME_VEC_FREE: &str = "_toylang_vec_free"; // fn(vec_handle: i8*) -> void
+const RUNTIME_VEC_NEW: &str = "_phoenix_vec_new"; // fn(elem_size: i64, capacity: i64) -> i8*
+const RUNTIME_VEC_GET_PTR: &str = "_phoenix_vec_get_ptr"; // fn(vec_handle: i8*, index: i64) -> i8* (pointer to element)
+const RUNTIME_VEC_LEN: &str = "_phoenix_vec_len"; // fn(vec_handle: i8*) -> i64
+const RUNTIME_VEC_PUSH: &str = "_phoenix_vec_push"; // fn(vec_handle: i8*, value_ptr: i8*) -> void
+const RUNTIME_VEC_FREE: &str = "_phoenix_vec_free"; // fn(vec_handle: i8*) -> void
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -367,7 +367,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
     // Helper to create an alloca instruction in the function's entry block
     // This ensures all allocas happen at the start, which is good practice in LLVM.
-    // Alloca helper now needs the ToyLang Type to allocate correctly
+    // Alloca helper now needs the phoenix Type to allocate correctly
     fn create_entry_block_alloca(&self, name: &str, ty: Type) -> PointerValue<'ctx> {
         let temp_builder = self.context.create_builder();
         // Ensure current_function is set before calling this
@@ -380,7 +380,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             Some(first_instr) => temp_builder.position_before(&first_instr),
             None => temp_builder.position_at_end(entry_block),
         };
-        // Allocate memory for the correct LLVM type based on ToyLang Type
+        // Allocate memory for the correct LLVM type based on phoenix Type
         let llvm_type = match ty.to_llvm_basic_type(self.context) {
             Some(llvm_type) => llvm_type,
             None => {
@@ -775,7 +775,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     // Args validated by type checker: args[0] is vec handle, args[1] is element
                     let vec_handle_val = self.compile_expression(&args[0])?;
                     let elem_val = self.compile_expression(&args[1])?;
-                    let vec_handle_ptr = match vec_handle_val { 
+                    let vec_handle_ptr = match vec_handle_val {
                         BasicValueEnum::PointerValue(pv)
                         if pv.get_type()
                             == self.context.i8_type().ptr_type(AddressSpace::default()) => {
@@ -1606,7 +1606,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         func
     }
 
-    // Get size of a ToyLang Type in bytes (basic implementation)
+    // Get size of a phoenix Type in bytes (basic implementation)
     fn get_sizeof(&self, ty: &Type) -> Option<u64> {
         // This needs target machine data layout ideally! Hardcoding for now. Assumes 64-bit.
         match ty {

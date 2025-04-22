@@ -20,7 +20,7 @@ pub fn link_object_file(obj_path: &Path, executable_name: &str) {
     } else {
         "release"
     };
-    let lib_name = "libtoylang_runtime.a"; // Matches package name by default
+    let lib_name = "libphoenix_runtime.a"; // Matches package name by default
     let lib_path = Path::new(&target_dir).join(profile).join(lib_name);
 
     if !lib_path.exists() {
@@ -40,7 +40,7 @@ pub fn link_object_file(obj_path: &Path, executable_name: &str) {
     );
 
     let status = Command::new(linker)
-        .arg(obj_path) // Input object file from ToyLang code
+        .arg(obj_path) // Input object file from phoenix code
         .arg(lib_path) // Input static library containing the wrapper
         .arg("-o")
         .arg(executable_name)
