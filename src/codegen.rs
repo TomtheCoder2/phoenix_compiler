@@ -1632,7 +1632,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } => {
                 // Compile the value expression
                 let compiled_value = self.compile_expression(value)?;
-                self.compile_var_let_stmt(name, type_ann, compiled_value, false)
+                self.compile_var_let_stmt(name, type_ann, compiled_value, false, span)
             }
 
             // --- Return Statement ---
@@ -1672,7 +1672,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let compiled_value = self.compile_expression(value)?;
 
                 // Let statement yields no value itself
-                self.compile_var_let_stmt(name, type_ann, compiled_value, true)
+                self.compile_var_let_stmt(name, type_ann, compiled_value, true, span)
             }
 
             StatementKind::ExpressionStmt(expr) => {
@@ -2074,6 +2074,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         type_ann: &Option<TypeNode>,
         compiled_value: BasicValueEnum,
         is_mutable: bool,
+        span: Span
     ) -> CompileStmtResult<'ctx> {
         // convert type_ann: TypeNode to Type with type_node_to_type
         let type_ann = match type_ann {
@@ -2104,7 +2105,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 file!(),
                                 line!()
                             ),
-                            Span::default(),
+                            span,
                         ))
                     }
                 }
