@@ -184,6 +184,17 @@ impl Expression {
             ExpressionKind::IndexAccess { target, index } => {
                 format!("{}[{}]", target.to_code(), index.to_code())
             } // Add more cases as needed
+            ExpressionKind::LogicalOp { op, left, right } => {
+                format!(
+                    "{} {} {}",
+                    left.to_code(),
+                    match op {
+                        LogicalOperator::And => "&&",
+                        LogicalOperator::Or => "||",
+                    },
+                    right.to_code()
+                )
+            }
         }
     }
 }
@@ -302,6 +313,11 @@ pub enum ExpressionKind {
         op: UnaryOperator,
         operand: Box<Expression>,
     },
+    LogicalOp {
+        op: LogicalOperator,
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
     // Added for Vectors
     VectorLiteral {
         elements: Vec<Expression>, // e.g., [1, 2, 3]
@@ -330,6 +346,12 @@ pub enum ComparisonOperator {
     NotEqual,
     LessEqual,
     GreaterEqual,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum LogicalOperator {
+    And, // &&
+    Or,  // ||
 }
 
 // #[derive(Debug, PartialEq, Clone, Copy)]

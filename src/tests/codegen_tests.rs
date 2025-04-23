@@ -6,6 +6,7 @@ mod tests {
     use inkwell::context::Context;
     use std::path::Path;
     use inkwell::values::AnyValue;
+    use crate::typechecker::TypeChecker;
     use crate::types::Type;
 
     #[test]
@@ -149,9 +150,21 @@ mod tests {
             }),
             body,
         };
+        let programm = Program {
+            statements: vec![defs(func_def.clone())],
+            span: Default::default(),
+        };
+        // run typechecker on the function definition
+        let mut typechecker = TypeChecker::new();
+        let typecheck_result = typechecker.check_program(&programm);
+        assert!(typecheck_result.is_ok());
 
         // Compile the function definition
-        let result = compiler.compile_statement(&defs(func_def));
+        let result = compiler.compile_program_to_module(&programm);
+        // print all errors
+        if let Err(e) = &result {
+            eprintln!("Error: {:?}", e);
+        }
 
         // Verify compilation succeeded
         assert!(result.is_ok());

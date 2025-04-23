@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use crate::ast::{
         def, BinaryOperator, BinaryOperator::*, ComparisonOperator, Expression, ExpressionKind,
-        ExpressionKind::*, StatementKind, StatementKind::*, TypeNodeKind, UnaryOperator,
+        ExpressionKind::*, LogicalOperator, StatementKind, StatementKind::*, TypeNodeKind,
+        UnaryOperator,
     };
     use crate::lexer::Lexer;
     use crate::parser::{ParseError, Parser};
@@ -626,14 +626,17 @@ mod tests {
                 ExpressionKind::Assignment { target, value } => {
                     // Check target is IndexAccess
                     match &target.kind {
-                        ExpressionKind::IndexAccess { target: vec_expr, index } => {
+                        ExpressionKind::IndexAccess {
+                            target: vec_expr,
+                            index,
+                        } => {
                             match &vec_expr.kind {
                                 ExpressionKind::Variable(name) => assert_eq!(name, "my_vec"),
-                                _ => panic!("Expected var target in index")
+                                _ => panic!("Expected var target in index"),
                             }
                             match &index.kind {
                                 ExpressionKind::IntLiteral(i) => assert_eq!(*i, 0),
-                                _ => panic!("Expected int literal index")
+                                _ => panic!("Expected int literal index"),
                             }
                         }
                         _ => panic!("Assignment target not IndexAccess"),
@@ -648,7 +651,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_push_call() { // Parses like a normal function call
+    fn test_parse_push_call() {
+        // Parses like a normal function call
         let input = "push(my_vec, 5);";
         // todo
         // ... assert AST is ExpressionStmt(FunctionCall{ name:"push", args:[Variable("my_vec"), IntLit(5)] }) ...
@@ -970,9 +974,7 @@ mod tests {
         let program = parser.parse_program().unwrap();
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0].kind {
-            StatementKind::ExpressionStmt (
-                s
-            ) => {
+            StatementKind::ExpressionStmt(s) => {
                 // let value = Expression::new(
                 //     ExpressionKind::BinaryOp {
                 //         op,
@@ -993,15 +995,45 @@ mod tests {
                 //     left.span.clone(),
                 // );
                 match &s.kind {
-                    ExpressionKind::Assignment { target, value } => {
-                        match &target.kind {
-                            ExpressionKind::Variable(name) => assert_eq!(name, "x"),
-                            _ => panic!("Expected Variable for target"),
-                        }
-                    }
+                    ExpressionKind::Assignment { target, value } => match &target.kind {
+                        ExpressionKind::Variable(name) => assert_eq!(name, "x"),
+                        _ => panic!("Expected Variable for target"),
+                    },
                     _ => panic!("Expected Assignment expression"),
                 }
             }
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logical_ops() {
+        let input = "a && b || c;";
+        // Expected: (a && b) || c
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            ExpressionStmt(expr) => match &expr.kind {
+                LogicalOp { op, left, right } => {
+                    assert_eq!(*op, LogicalOperator::Or);
+                    match &left.kind {
+                        LogicalOp {
+                            op: inner_op,
+                            left: inner_left,
+                            right: inner_right,
+                        } => {
+                            assert_eq!(*inner_op, LogicalOperator::And);
+                            assert_eq!(inner_left.kind, Variable("a".to_string()));
+                            assert_eq!(inner_right.kind, Variable("b".to_string()));
+                        }
+                        _ => panic!("Expected LogicalOp for left operand"),
+                    }
+                    assert_eq!(right.kind, Variable("c".to_string()));
+                }
+                _ => panic!("Expected LogicalOp expression"),
+            },
             _ => panic!("Expected ExpressionStmt"),
         }
     }

@@ -1,9 +1,6 @@
 // src/typechecker.rs
 
-use crate::ast::{
-    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program, Statement,
-    StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
-};
+use crate::ast::{BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator};
 use crate::location::{Location, Span};
 use crate::symbol_table::{FunctionSignature, SymbolInfo, SymbolTable};
 use crate::types::Type;
@@ -848,6 +845,29 @@ impl TypeChecker {
                         None
                     }
                     _ => None, // Error in operand
+                }
+            }
+            ExpressionKind::LogicalOp { op, left, right } => {
+                let left_type_opt = self.check_expression(left);
+                let right_type_opt = self.check_expression(right);
+                let op_str = match op { LogicalOperator::And => "&&", LogicalOperator::Or => "||" };
+
+                match (left_type_opt, right_type_opt) {
+                    (Some(Type::Bool), Some(Type::Bool)) => Some(Type::Bool), // bool && bool -> bool
+                    (Some(lt), Some(rt)) => {
+                        // Error if not bool or type mismatch
+                        if lt != Type::Bool || rt != Type::Bool {
+                            self.errors.push(TypeError::InvalidOperation {
+                                op: op_str.to_string(),
+                                type_info: format!("{} and {}", lt, rt), // Report actual types
+                                span
+                            });
+                        }
+                        // If types mismatch but one *was* bool, maybe report better?
+                        // For now, just report general invalid op if ! (bool, bool)
+                        None
+                    }
+                    _ => None, // Error in operand(s)
                 }
             }
             ExpressionKind::StringLiteral(string) => Some(Type::String),

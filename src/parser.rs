@@ -2,10 +2,7 @@
 
 // Use the new AST structures
 use crate::ast::ExpressionKind::BinaryOp;
-use crate::ast::{
-    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program, Statement,
-    StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
-};
+use crate::ast::{BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator};
 use crate::lexer::Lexer;
 use crate::location::{Location, Span};
 use crate::parser::Precedence::Lowest;
@@ -93,17 +90,19 @@ pub type ParseResult<T> = Result<T, ParseError>;
 
 // --- Operator Precedence ---
 // Define precedence levels for all operators
-#[derive(PartialEq, PartialOrd)] // Allow comparing levels
+#[derive(PartialEq, PartialOrd)]
 enum Precedence {
     Lowest,
     Assign,      // =
+    Or,          // || // Added
+    And,         // && // Added
     Equals,      // ==, !=
     LessGreater, // >, <, >=, <=
     Sum,         // +, -
     Product,     // *, /
-    Prefix,      // -X or !X (Add later)
+    Prefix,      // -X or !X
     Call,        // myFunction(X)
-    Index,       // array[index] // Added (highest precedence)
+    Index,       // array[index]
 }
 
 // Map tokens to precedence levels
@@ -116,6 +115,8 @@ fn token_precedence(token: &TokenKind) -> Precedence {
         | TokenKind::MinusAssign
         | TokenKind::StarAssign
         | TokenKind::SlashAssign => Precedence::Assign,
+        TokenKind::Or => Precedence::Or,   
+        TokenKind::And => Precedence::And, 
         TokenKind::Equal | TokenKind::NotEqual => Precedence::Equals,
         TokenKind::LessThan
         | TokenKind::GreaterThan
@@ -145,6 +146,15 @@ fn token_to_binary_op(token: &TokenKind) -> Option<BinaryOperator> {
         TokenKind::Minus => Some(BinaryOperator::Subtract),
         TokenKind::Star => Some(BinaryOperator::Multiply),
         TokenKind::Slash => Some(BinaryOperator::Divide),
+        _ => None,
+    }
+}
+
+// Map tokens to LogicalOperator
+fn token_to_logical_op(token: &Token) -> Option<LogicalOperator> {
+    match token.kind {
+        TokenKind::And => Some(LogicalOperator::And),
+        TokenKind::Or => Some(LogicalOperator::Or),
         _ => None,
     }
 }
@@ -286,6 +296,7 @@ impl<'a> Parser<'a> {
 
         // 1. Parse Initializer (Optional Expression before first ';')
         let initializer = if self.current_token.kind == TokenKind::Semicolon {
+            self.expect_and_consume_kind(TokenKind::Semicolon)?;
             None // No initializer expression
         } else {
             // Parse expression, box it
@@ -582,6 +593,18 @@ impl<'a> Parser<'a> {
                         },
                         span,
                     )
+                }
+                // --- Logical Operators ---
+                TokenKind::And | TokenKind::Or => {
+                    let op = token_to_logical_op(&infix_token).unwrap();
+                    let current_precedence = token_precedence(&infix_token.kind);
+                    self.next_token(); // Consume '&&' or '||'
+                    let right = self.parse_expression(current_precedence)?; // Left-associative
+                    let span = left.span.combine(&right.span);
+                    left = Expression::new(
+                        ExpressionKind::LogicalOp { op, left: Box::new(left), right: Box::new(right) },
+                        span
+                    );
                 }
                 // Function Call
                 TokenKind::LParen => {

@@ -151,6 +151,24 @@ impl<'a> Lexer<'a> {
                                     // TokenKind::Illegal('!') // For now, '!' alone is illegal
                 }
             }
+            Some('&') => {
+                if self.peek_char == Some('&') {
+                    self.read_char(); // Consume second '&'
+                    TokenKind::And // '&&'
+                } else {
+                    // Handle bitwise AND later if needed
+                    TokenKind::Illegal('&') // '&' alone is illegal for now
+                }
+            }
+            Some('|') => {
+                if self.peek_char == Some('|') {
+                    self.read_char(); // Consume second '|'
+                    TokenKind::Or // '||'
+                } else {
+                    // Handle bitwise OR later if needed
+                    TokenKind::Illegal('|') // '|' alone is illegal for now
+                }
+            }
             Some('<') => {
                 if self.peek_char == Some('=') {
                     self.read_char(); // Consume '='
@@ -714,10 +732,7 @@ mod tests {
     fn test_plusplus() {
         let input = "x++";
         let mut l = Lexer::new("test.txt".to_string(), input);
-        let tokens = vec![
-            TokenKind::Identifier("x".to_string()),
-            TokenKind::PlusPlus
-        ];
+        let tokens = vec![TokenKind::Identifier("x".to_string()), TokenKind::PlusPlus];
         for expected in tokens {
             assert_eq!(l.next_token().kind, expected);
         }
@@ -731,6 +746,24 @@ mod tests {
             TokenKind::Identifier("x".to_string()),
             TokenKind::PlusAssign,
             TokenKind::IntNum(1),
+        ];
+        for expected in tokens {
+            assert_eq!(l.next_token().kind, expected);
+        }
+    }
+    
+    // && and ||
+    #[test]
+    fn test_logical_operators() {
+        let input = "true && false || !true";
+        let mut l = Lexer::new("test.txt".to_string(), input);
+        let tokens = vec![
+            TokenKind::BoolLiteral(true),
+            TokenKind::And,
+            TokenKind::BoolLiteral(false),
+            TokenKind::Or,
+            TokenKind::Bang,
+            TokenKind::BoolLiteral(true),
         ];
         for expected in tokens {
             assert_eq!(l.next_token().kind, expected);

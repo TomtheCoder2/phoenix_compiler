@@ -53,8 +53,8 @@ pub enum TokenKind {
 
     // Logical Operators (Add later?)
     Bang, // '!' (Negation)
-    // And,  // '&&'
-    // Or,   // '||'
+    And,  // '&&'
+    Or,   // '||'
 
     // Delimiters
     LParen,    // '('

@@ -77,10 +77,12 @@ Phoenix is under active development. Recent additions include:
 
 ## Roadmap
 
-- [ ] String as a first-class type
+- [x] String as a first-class type
 - [ ] Multi-file support
 - [ ] Structs and classes
 - [ ] Logical operators (`&&` and `||`)
+  - a && b: If a evaluates to false, b is not evaluated, and the result is false.
+  - a || b: If a evaluates to true, b is not evaluated, and the result is true.
 - [ ] Functions as variables
 - [ ] Package management
 - [ ] REPL

@@ -1,8 +1,8 @@
 // src/codegen.rs
 
 use crate::ast::{
-    type_node_to_type, BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program,
-    Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
+    type_node_to_type, BinaryOperator, ComparisonOperator, Expression, ExpressionKind,
+    LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
 };
 use crate::location::Span;
 // Added BasicValueEnum
@@ -322,6 +322,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         } else {
             // Handle verification failure before optimization
             // unsafe { main_function.delete(); }
+            // write the IR to file for debugging
+            let ir_file_path = Path::new("main_verification_error.ll");
+            match std::fs::write(&ir_file_path, self.module.print_to_string().to_string()) {
+                Ok(_) => println!("LLVM IR written to: {}", ir_file_path.display()),
+                Err(e) => eprintln!("Error writing LLVM IR to file: {}", e),
+            }
+            
             return Err(CodeGenError::LlvmError(
                 "Main function verification failed before optimization".to_string(),
                 Span::default(), // Placeholder, should be the actual span of the main function
@@ -519,7 +526,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 let lhs_type = left.get_type().unwrap_or(Type::Void); // Get type from AST node
                 let rhs_type = right.get_type().unwrap_or(Type::Void);
-
+                
                 // Basic type checking (Replace with proper type checker later)
                 match (lhs_type, rhs_type, op) {
                     (Type::Int, Type::Int, _) => {
@@ -733,6 +740,180 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     }
                 } // End match op
             }
+            // --- Logical Operators (with short-circuiting) ---
+            ExpressionKind::LogicalOp { op, left, right } => {
+                let current_func = self
+                    .current_function
+                    .expect("Cannot compile logical op outside func");
+
+                match op {
+                    LogicalOperator::And => {
+                        // --- Short-circuiting AND (a && b) ---
+                        // 1. Evaluate LHS (a)
+                        let lhs_val = self.compile_expression(left)?;
+                        let lhs_bool = match lhs_val {
+                            // Check if lhs_val is i1 (boolean)
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
+                                iv
+                            }
+                            _ => {
+                                return Err(CodeGenError::InvalidBinaryOperation(
+                                    format!(
+                                        "Left operand of '&&' must be boolean (i1), found {:?}",
+                                        lhs_val.get_type()
+                                    ),
+                                    span,
+                                ))
+                            }
+                        };
+                        let cond_bb = self
+                            .builder
+                            .get_insert_block()
+                            .expect("Builder not positioned before AND op");
+
+                        // 2. Create blocks
+                        let rhs_bb = self.context.append_basic_block(current_func, "and_rhs");
+                        let merge_bb = self.context.append_basic_block(current_func, "and_cont");
+
+                        // 3. Conditional branch based on LHS
+                        // If LHS is false, jump directly to merge (result is false)
+                        // If LHS is true, jump to RHS block to evaluate RHS
+                        let false_val = self.context.bool_type().const_int(0, false);
+                        self.builder
+                            .build_conditional_branch(lhs_bool, rhs_bb, merge_bb);
+
+                        // 4. Compile RHS block
+                        self.builder.position_at_end(rhs_bb);
+                        let rhs_val = self.compile_expression(right)?;
+                        let rhs_bool = match rhs_val {
+                            // Check if rhs_val is i1 (boolean)
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
+                                iv
+                            }
+                            _ => {
+                                return Err(CodeGenError::InvalidBinaryOperation(
+                                    format!(
+                                        "Right operand of '&&' must be boolean (i1), found {:?}",
+                                        rhs_val.get_type()
+                                    ),
+                                    span,
+                                ))
+                            }
+                        };
+                        let rhs_final_bb = self.builder.get_insert_block().unwrap_or(rhs_bb); // Block where RHS value is available
+                        if rhs_final_bb.get_terminator().is_none() {
+                            self.builder.build_unconditional_branch(merge_bb); // Terminate RHS path
+                        }
+                        // Branch to merge block (result is RHS value)
+                        if rhs_bb.get_terminator().is_none() {
+                            self.builder.build_unconditional_branch(merge_bb);
+                        }
+                        // let rhs_end_bb = self.builder.get_insert_block().unwrap_or(rhs_bb);
+
+                        // 5. Compile Merge Block (PHI node)
+                        self.builder.position_at_end(merge_bb);
+                        let phi = match self.builder.build_phi(self.context.bool_type(), "and_tmp")
+                        {
+                            Ok(phi) => phi,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during PHI node creation: {}", e),
+                                    span,
+                                ))
+                            }
+                        };
+                        phi.add_incoming(&[
+                            (&false_val, cond_bb),   // If branch from cond was false, result is false
+                            (&rhs_bool, rhs_final_bb), // If branch from rhs_bb, result is rhs_bool
+                        ]);
+
+                        Ok(phi.as_basic_value())
+                    } // End And
+
+                    LogicalOperator::Or => {
+                        // --- Short-circuiting OR (a || b) ---
+                        // 1. Evaluate LHS (a)
+                        let lhs_val = self.compile_expression(left)?;
+                        let lhs_bool = match lhs_val {
+                            // Check if lhs_val is i1 (boolean)
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
+                                iv
+                            }
+                            _ => {
+                                return Err(CodeGenError::InvalidBinaryOperation(
+                                    format!(
+                                        "Left operand of '||' must be boolean (i1), found {:?}",
+                                        lhs_val.get_type()
+                                    ),
+                                    span,
+                                ))
+                            }
+                        };
+
+                        // 2. Create blocks
+                        let rhs_bb = self.context.append_basic_block(current_func, "or_rhs");
+                        let merge_bb = self.context.append_basic_block(current_func, "or_cont");
+
+                        // 3. Conditional branch based on LHS
+                        // If LHS is true, jump directly to merge (result is true)
+                        // If LHS is false, jump to RHS block to evaluate RHS
+                        let true_val = self.context.bool_type().const_int(1, false);
+                        // Branch needs block where LHS was computed for PHI later
+                        let cond_bb = self
+                            .builder
+                            .get_insert_block()
+                            .expect("Builder not positioned before OR op");
+                        self.builder
+                            .build_conditional_branch(lhs_bool, merge_bb, rhs_bb); // Note order: true->merge, false->rhs
+
+                        // 4. Compile RHS block
+                        self.builder.position_at_end(rhs_bb);
+                        let rhs_val = self.compile_expression(right)?;
+                        let rhs_bool = match rhs_val {
+                            // Check if rhs_val is i1 (boolean)
+                            BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 1 => {
+                                iv
+                            }
+                            _ => {
+                                return Err(CodeGenError::InvalidBinaryOperation(
+                                    format!(
+                                        "Right operand of '||' must be boolean (i1), found {:?}",
+                                        rhs_val.get_type()
+                                    ),
+                                    span,
+                                ))
+                            }
+                        };
+                        let rhs_final_bb = self.builder.get_insert_block().unwrap_or(rhs_bb); // Block where RHS value is available
+                        if rhs_final_bb.get_terminator().is_none() {
+                            self.builder.build_unconditional_branch(merge_bb); // Terminate RHS path
+                        }
+                        // Branch to merge block (result is RHS value)
+                        if rhs_bb.get_terminator().is_none() {
+                            self.builder.build_unconditional_branch(merge_bb);
+                        }
+                        let rhs_end_bb = self.builder.get_insert_block().unwrap_or(rhs_bb);
+
+                        // 5. Compile Merge Block (PHI node)
+                        self.builder.position_at_end(merge_bb);
+                        let phi = match self.builder.build_phi(self.context.bool_type(), "or_tmp") {
+                            Ok(phi) => phi,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during PHI node creation: {}", e),
+                                    span,
+                                ))
+                            }
+                        };
+                        phi.add_incoming(&[
+                            (&true_val, cond_bb),    // If branch from cond was true, result is true
+                            (&rhs_bool, rhs_final_bb), // If branch from rhs_bb, result is rhs_bool
+                        ]);
+
+                        Ok(phi.as_basic_value())
+                    } // End Or
+                } // End match op
+            } // End LogicalOp
             // --- Handle Function Calls ---
             ExpressionKind::FunctionCall { name, args } => {
                 // --- >> SPECIAL CASE: Built-in print function << ---
@@ -1686,9 +1867,11 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         let void_type = self.context.void_type();
         let fn_type = void_type.fn_type(&[], false);
 
-        let func = self
-            .module
-            .add_function("print_str_ln_wrapper_func", fn_type, Some(Linkage::External));
+        let func = self.module.add_function(
+            "print_str_ln_wrapper_func",
+            fn_type,
+            Some(Linkage::External),
+        );
         self.print_str_ln_wrapper_func = Some(func); // Store in cache
         Ok(func)
     }

@@ -17,6 +17,19 @@ pub enum Type {
     Vector(Box<Type>), // Added: Stores the element type, Boxed
 }
 
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::Float => write!(f, "float"),
+            Type::Int => write!(f, "int"),
+            Type::Bool => write!(f, "bool"),
+            Type::Void => write!(f, "void"),
+            Type::String => write!(f, "string"),
+            Type::Vector(elem_ty) => write!(f, "vec<{}>", elem_ty), // Display vec<T>
+        }
+    }
+}
+
 impl Type {
     /// Get the corresponding LLVM BasicTypeEnum
     /// Panics if called on Type::Void or other non-basic types later.
@@ -65,16 +78,3 @@ impl Type {
     // ... add more specific helpers as needed
 }
 
-// Implement Display for nice printing
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Type::Float => write!(f, "float"),
-            Type::Int => write!(f, "int"),
-            Type::Bool => write!(f, "bool"),
-            Type::Void => write!(f, "void"),
-            Type::String => write!(f, "string"),
-            Type::Vector(elem_ty) => write!(f, "vec<{}>", elem_ty), // Display vec<T>
-        }
-    }
-}
