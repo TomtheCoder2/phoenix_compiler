@@ -51,7 +51,7 @@ impl fmt::Display for ParseError {
             } => {
                 write!(
                     f,
-                    "Parse Error at {}: Expected {}, found {:?}",
+                    "Parse Error at {}: Expected {}, found {}",
                     loc, expected, found
                 )
             }
@@ -65,7 +65,7 @@ impl fmt::Display for ParseError {
                 write!(f, "Parse Error at {}: Expected an identifier", loc)
             }
             ParseError::ExpectedToken { expected, loc } => {
-                write!(f, "Parse Error at {}: Expected token {:?}", loc, expected)
+                write!(f, "Parse Error at {}: Expected token {}", loc, expected)
             }
             ParseError::InvalidTypeAnnotation { type_name, loc } => {
                 write!(

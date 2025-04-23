@@ -1,5 +1,6 @@
 // src/TokenKind.rs
 
+use std::fmt;
 use crate::location::Location;
 use crate::types::Type;
 // Import our new Type enum
@@ -85,6 +86,62 @@ pub enum TokenKind {
 
     // Identifiers
     Identifier(String),
+}
+
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenKind::Illegal(c) => write!(f, "Illegal({})", c),
+            TokenKind::Eof => write!(f, "EOF"),
+            TokenKind::FloatNum(n) => write!(f, "FloatNum({})", n),
+            TokenKind::IntNum(n) => write!(f, "IntNum({})", n),
+            TokenKind::BoolLiteral(b) => write!(f, "BoolLiteral({})", b),
+            TokenKind::StringLiteral(s) => write!(f, "StringLiteral({})", s),
+            TokenKind::Plus => write!(f, "+"),
+            TokenKind::PlusAssign => write!(f, "+="),
+            TokenKind::PlusPlus => write!(f, "++"),
+            TokenKind::Minus => write!(f, "-"),
+            TokenKind::MinusAssign => write!(f, "-="),
+            TokenKind::MinusMinus => write!(f, "--"),
+            TokenKind::Star => write!(f, "*"),
+            TokenKind::StarAssign => write!(f, "*="),
+            TokenKind::Slash => write!(f, "/"),
+            TokenKind::SlashAssign => write!(f, "/="),
+            TokenKind::Assign => write!(f, "="),
+            TokenKind::LessThan => write!(f, "<"),
+            TokenKind::GreaterThan => write!(f, ">"),
+            TokenKind::Equal => write!(f, "=="),
+            TokenKind::NotEqual => write!(f, "!="),
+            TokenKind::LessEqual => write!(f, "<="),
+            TokenKind::GreaterEqual => write!(f, ">="),
+            TokenKind::Bang => write!(f, "!"),
+            TokenKind::And => write!(f, "&&"),
+            TokenKind::Or => write!(f, "||"),
+            TokenKind::LParen => write!(f, "("),
+            TokenKind::RParen => write!(f, ")"),
+            TokenKind::Semicolon => write!(f, ";"),
+            TokenKind::Comma => write!(f, ","),
+            TokenKind::LBrace => write!(f, "{{"),
+            TokenKind::RBrace => write!(f, "}}"),
+            TokenKind::Colon => write!(f, ":"),
+            TokenKind::LBracket => write!(f, "["),
+            TokenKind::RBracket => write!(f, "]"),
+            TokenKind::Let => write!(f, "let"),
+            TokenKind::Var => write!(f, "var"),
+            TokenKind::Fun => write!(f, "fun"),
+            TokenKind::True => write!(f, "true"),
+            TokenKind::False => write!(f, "false"),
+            TokenKind::If => write!(f, "if"),
+            TokenKind::Else => write!(f, "else"),
+            TokenKind::While => write!(f, "while"),
+            TokenKind::For => write!(f, "for"),
+            TokenKind::Return => write!(f, "return"),
+            TokenKind::Identifier(s) => write!(f, "Identifier({})", s),
+            // TokenKind::TypeInt => write!(f, "int"),
+            // TokenKind::TypeFloat => write!(f, "float"),
+            // TokenKind::TypeBool => write!(f, "bool"),
+        }
+    }
 }
 
 // Helper to maybe parse type names (optional, can rely on identifiers)

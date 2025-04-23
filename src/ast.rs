@@ -1,6 +1,7 @@
 use crate::location::Span;
 use crate::types::Type;
 use std::cell::RefCell;
+use std::fmt;
 
 // src/ast.rs
 pub type NumberType = f64;
@@ -274,6 +275,16 @@ pub enum UnaryOperator {
     Not,    // Logical not (!)
 }
 
+impl fmt::Display for UnaryOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = match self {
+            UnaryOperator::Negate => "-",
+            UnaryOperator::Not => "!",
+        };
+        write!(f, "{}", op)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum ExpressionKind {
     // Renamed from Expression
@@ -338,6 +349,18 @@ pub enum BinaryOperator {
     Divide,
 }
 
+impl fmt::Display for BinaryOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = match self {
+            BinaryOperator::Add => "+",
+            BinaryOperator::Subtract => "-",
+            BinaryOperator::Multiply => "*",
+            BinaryOperator::Divide => "/",
+        };
+        write!(f, "{}", op)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ComparisonOperator {
     LessThan,
@@ -348,10 +371,34 @@ pub enum ComparisonOperator {
     GreaterEqual,
 }
 
+impl fmt::Display for ComparisonOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = match self {
+            ComparisonOperator::LessThan => "<",
+            ComparisonOperator::GreaterThan => ">",
+            ComparisonOperator::Equal => "==",
+            ComparisonOperator::NotEqual => "!=",
+            ComparisonOperator::LessEqual => "<=",
+            ComparisonOperator::GreaterEqual => ">=",
+        };
+        write!(f, "{}", op)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum LogicalOperator {
     And, // &&
     Or,  // ||
+}
+
+impl fmt::Display for LogicalOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let op = match self {
+            LogicalOperator::And => "&&",
+            LogicalOperator::Or => "||",
+        };
+        write!(f, "{}", op)
+    }
 }
 
 // #[derive(Debug, PartialEq, Clone, Copy)]

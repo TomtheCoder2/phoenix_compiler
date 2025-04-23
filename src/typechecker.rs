@@ -788,7 +788,7 @@ impl TypeChecker {
                     // --- Errors ---
                     (Some(lt), Some(rt), _) => {
                         self.errors.push(TypeError::InvalidOperation {
-                            op: format!("{:?}", op),
+                            op: format!("{}", op),
                             type_info: format!("{} and {}", lt, rt),
                             span,
                         });
@@ -805,7 +805,7 @@ impl TypeChecker {
                         // Allow comparing identical types (int, float, bool, string for ==/!=)
                         if lt != rt || lt == Type::Void {
                             self.errors.push(TypeError::InvalidOperation {
-                                op: format!("{:?}", op),
+                                op: format!("{}", op),
                                 type_info: format!("{} and {}", lt, rt),
                                 span,
                             });
@@ -818,7 +818,7 @@ impl TypeChecker {
                         {
                             // String comparison only allowed for == and !=
                             self.errors.push(TypeError::InvalidOperation {
-                                op: format!("{:?}", op),
+                                op: format!("{}", op),
                                 type_info: format!("{} and {}", lt, rt),
                                 span,
                             });
@@ -838,7 +838,7 @@ impl TypeChecker {
                     (UnaryOperator::Not, Some(Type::Bool)) => Some(Type::Bool),
                     (UnaryOperator::Negate, Some(other)) => {
                         self.errors.push(TypeError::InvalidOperation {
-                            op: format!("{:?}", op),
+                            op: format!("{}", op),
                             type_info: format!("{}", other),
                             span,
                         });

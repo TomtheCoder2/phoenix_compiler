@@ -584,7 +584,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         Ok(result_handle.into()) // Result is new string handle (i8*)
                     }
                     _ => Err(CodeGenError::InvalidBinaryOperation(
-                        format!("Type mismatch or unsupported types for operator {:?} (lhs: {:?}, rhs: {:?})", op, lhs.get_type(), rhs.get_type())
+                        format!("Type mismatch or unsupported types for operator {} (lhs: {}, rhs: {})", op, lhs.get_type(), rhs.get_type())
                         , span))
                 }
             }
@@ -639,7 +639,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             ),
                             _ => {
                                 return Err(CodeGenError::InvalidBinaryOperation(
-                                    format!("Unsupported comparison {:?} for booleans", op),
+                                    format!("Unsupported comparison {} for booleans", op),
                                     span,
                                 ))
                             }
@@ -648,7 +648,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     _ => {
                         return Err(CodeGenError::InvalidBinaryOperation(
                             format!(
-                                "Type mismatch for comparison operator {:?} (lhs: {:?}, rhs: {:?})",
+                                "Type mismatch for comparison operator {} (lhs: {}, rhs: {})",
                                 op,
                                 lhs.get_type(),
                                 rhs.get_type()
@@ -702,7 +702,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             }
                             _ => Err(CodeGenError::InvalidUnaryOperation(
                                 format!(
-                                    "Cannot apply arithmetic negate '-' to type {:?}",
+                                    "Cannot apply arithmetic negate '-' to type {}",
                                     compiled_operand.get_type()
                                 ),
                                 span,
@@ -731,7 +731,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             }
                             _ => Err(CodeGenError::InvalidUnaryOperation(
                                 format!(
-                                    "Cannot apply logical not '!' to type {:?}",
+                                    "Cannot apply logical not '!' to type {}",
                                     compiled_operand.get_type()
                                 ),
                                 span,
@@ -759,7 +759,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidBinaryOperation(
                                     format!(
-                                        "Left operand of '&&' must be boolean (i1), found {:?}",
+                                        "Left operand of '&&' must be boolean (i1), found {}",
                                         lhs_val.get_type()
                                     ),
                                     span,
@@ -793,7 +793,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidBinaryOperation(
                                     format!(
-                                        "Right operand of '&&' must be boolean (i1), found {:?}",
+                                        "Right operand of '&&' must be boolean (i1), found {}",
                                         rhs_val.get_type()
                                     ),
                                     span,
@@ -842,7 +842,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidBinaryOperation(
                                     format!(
-                                        "Left operand of '||' must be boolean (i1), found {:?}",
+                                        "Left operand of '||' must be boolean (i1), found {}",
                                         lhs_val.get_type()
                                     ),
                                     span,
@@ -877,7 +877,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidBinaryOperation(
                                     format!(
-                                        "Right operand of '||' must be boolean (i1), found {:?}",
+                                        "Right operand of '||' must be boolean (i1), found {}",
                                         rhs_val.get_type()
                                     ),
                                     span,
@@ -945,7 +945,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::PrintArgError(
                                     format!(
-                                        "print_int expects an integer argument, found {:?}",
+                                        "print_int expects an integer argument, found {}",
                                         arg_value.get_type()
                                     ),
                                     span,
@@ -960,7 +960,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::PrintStrArgError(
                                     format!(
-                                        "Argument must be a string literal (evaluating to i8*), found {:?}",
+                                        "Argument must be a string literal (evaluating to i8*), found {}",
                                         arg_value.get_type()
                                     ),
                                     span,
@@ -1031,7 +1031,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         _ => {
                             return Err(CodeGenError::InvalidType(
                                 format!(
-                                    "Expected vector handle (i8*), found {:?}",
+                                    "Expected vector handle (i8*), found {}",
                                     vec_handle_val.get_type()
                                 ),
                                 span,
@@ -1089,7 +1089,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         _ => {
                             return Err(CodeGenError::InvalidType(
                                 format!(
-                                    "Expected vector or string handle (i8*), found {:?}",
+                                    "Expected vector or string handle (i8*), found {}",
                                     handle_val.get_type()
                                 ),
                                 span,
@@ -1136,7 +1136,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         _ => {
                             return Err(CodeGenError::InvalidType(
                                 format!(
-                                    "Expected vector handle (i8*), found {:?}",
+                                    "Expected vector handle (i8*), found {}",
                                     vec_handle_val.get_type()
                                 ),
                                 span,
@@ -1151,7 +1151,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         Some(Type::Vector(et)) => *et,
                         _ => {
                             return Err(CodeGenError::InvalidType(
-                                format!("Expected vector type, found {:?}", vec_resolved_type),
+                                format!("Expected vector type, found {}", vec_resolved_type.unwrap_or(Type::Void)),
                                 span,
                             ))
                         }
@@ -1252,7 +1252,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             // Attempt basic conversion (e.g., int to float) if needed later
                             // Or error out
                             return Err(CodeGenError::InvalidType(format!(
-                                "Argument {} type mismatch for function '{}': expected {:?}, found {:?}",
+                                "Argument {} type mismatch for function '{}': expected {}, found {}",
                                 i, name, expected_llvm_type, arg_val.get_type()
                             ), span));
                         }
@@ -1295,7 +1295,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 }
                                 _ => Err(CodeGenError::LlvmError(
                                     format!(
-                                        "Call to '{}' did not return expected type {:?}",
+                                        "Call to '{}' did not return expected type {}",
                                         name, expected_llvm_ret_type
                                     ),
                                     span,
@@ -1322,7 +1322,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         if compiled_rhs_value.get_type() != expected_llvm_type {
                             return Err(CodeGenError::InvalidType(
                                 format!(
-                                    "Assignment type mismatch for variable '{}': expected {:?}, found {:?}",
+                                    "Assignment type mismatch for variable '{}': expected {}, found {}",
                                     name, expected_llvm_type, compiled_rhs_value.get_type()
                                 ),
                                 span,
@@ -1342,7 +1342,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidType(
                                     format!(
-                                        "Expected vector handle to be a pointer, found {:?}",
+                                        "Expected vector handle to be a pointer, found {}",
                                         vec_handle_val.get_type()
                                     ),
                                     span,
@@ -1356,7 +1356,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                                 } else {
                                     return Err(CodeGenError::InvalidType(
                                         format!(
-                                            "Index must be i64, found {:?}",
+                                            "Index must be i64, found {}",
                                             index_val.get_type()
                                         ),
                                         span,
@@ -1366,7 +1366,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidType(
                                     format!(
-                                        "Expected index to be an integer, found {:?}",
+                                        "Expected index to be an integer, found {}",
                                         index_val.get_type()
                                     ),
                                     span,
@@ -1379,7 +1379,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         let elem_toy_type = match target_resolved_type {
                             Some(Type::Vector(et)) => *et,
                             _ => return Err(CodeGenError::InvalidType(
-                                format!("{} Cannot index into non-vector type {:?}", span, target_resolved_type),
+                                format!("{} Cannot index into non-vector type {}", span, target_resolved_type.unwrap_or(Type::Void)),
                                 span,
                             )),
                         };
@@ -1452,7 +1452,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     _ => {
                         return Err(CodeGenError::InvalidType(
                             format!(
-                                "If condition must be boolean (i1), found {:?}",
+                                "If condition must be boolean (i1), found {}",
                                 cond_val.get_type()
                             ),
                             span,
@@ -1497,7 +1497,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 if then_val.get_type() != else_val.get_type() {
                     return Err(CodeGenError::InvalidType(
                         format!(
-                            "If branches must have the same type: then {:?}, else {:?}",
+                            "If branches must have the same type: then {}, else {}",
                             then_val.get_type(),
                             else_val.get_type()
                         ),
@@ -2123,7 +2123,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     _ => {
                         return Err(CodeGenError::InvalidType(
                             format!(
-                                "While condition must be boolean (i1), found {:?}",
+                                "While condition must be boolean (i1), found {}",
                                 cond_val.get_type()
                             ),
                             span,
@@ -2197,7 +2197,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             _ => {
                                 return Err(CodeGenError::InvalidType(
                                     format!(
-                                        "For loop condition must be boolean (i1), found {:?}",
+                                        "For loop condition must be boolean (i1), found {}",
                                         cond_val.get_type()
                                     ),
                                     span,
@@ -2262,7 +2262,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     _ => {
                         return Err(CodeGenError::InvalidType(
                             format!(
-                                "If condition must be boolean (i1), found {:?}",
+                                "If condition must be boolean (i1), found {}",
                                 cond_val.get_type()
                             ),
                             span,
@@ -2563,7 +2563,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             // This indicates an internal error OR missing type conversion step
             return Err(CodeGenError::InvalidType(
                 format!(
-                    "Internal Error: RHS value type {:?} does not match variable type {:?} for '{}'",
+                    "Internal Error: RHS value type {} does not match variable type {} for '{}'",
                     compiled_value.get_type(), expected_llvm_type, name
                 ),
                 span
