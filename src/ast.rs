@@ -85,10 +85,10 @@ impl Expression {
         }
     }
 
-    // // Helper to get the resolved type (immutable borrow)
-    // pub fn get_type(&self) -> Option<Type> {
-    //     *self.resolved_type.borrow() // Dereference Ref<Option<Type>>
-    // }
+    // Helper to get the resolved type (immutable borrow)
+    pub fn get_type(&self) -> Option<Type> {
+        self.resolved_type.borrow().clone()
+    }
 
     // Helper to set the resolved type (mutable borrow)
     pub fn set_type(&self, ty: Type) {

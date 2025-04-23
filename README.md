@@ -83,6 +83,7 @@ Phoenix is under active development. Recent additions include:
 - [ ] Logical operators (`&&` and `||`)
 - [ ] Functions as variables
 - [ ] Package management
+- [ ] REPL
 
 ---
 

@@ -15,7 +15,6 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::AnyValue;
 use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
@@ -30,6 +29,13 @@ const RUNTIME_VEC_GET_PTR: &str = "_phoenix_vec_get_ptr"; // fn(vec_handle: i8*,
 const RUNTIME_VEC_LEN: &str = "_phoenix_vec_len"; // fn(vec_handle: i8*) -> i64
 const RUNTIME_VEC_PUSH: &str = "_phoenix_vec_push"; // fn(vec_handle: i8*, value_ptr: i8*) -> void
 const RUNTIME_VEC_FREE: &str = "_phoenix_vec_free"; // fn(vec_handle: i8*) -> void
+const RUNTIME_VEC_POP: &str = "_phoenix_vec_pop"; // fn(i8*) -> i8* (ptr to popped elem)
+
+const RUNTIME_STR_NEW: &str = "_phoenix_str_new"; // fn(*const c_char) -> i8* handle
+const RUNTIME_STR_LEN: &str = "_phoenix_str_len"; // fn(i8*) -> i64
+const RUNTIME_STR_FREE: &str = "_phoenix_str_free"; // fn(i8*) -> void
+const RUNTIME_STR_CONCAT: &str = "_phoenix_str_concat"; // fn(i8*, i8*) -> i8*
+const RUNTIME_STR_GET_CHAR_PTR: &str = "_phoenix_str_get_char_ptr"; // fn(i8*, i64) -> i8*
 
 // --- CodeGenError --- (UndefinedVariable is still relevant)
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +130,7 @@ type CompileStmtResult<'ctx> = Result<(Option<BasicValueEnum<'ctx>>, bool), Code
 
 // Helper struct to store variable info (pointer + type)
 #[derive(Debug, Clone)] // Copy is efficient as PointerValue/Type are Copy
+                        // todo add def_span
 struct VariableInfo<'ctx> {
     ptr: PointerValue<'ctx>,
     ty: Type,
@@ -154,6 +161,13 @@ pub struct Compiler<'a, 'ctx> {
     vec_len_func: Option<FunctionValue<'ctx>>,
     vec_push_func: Option<FunctionValue<'ctx>>,
     vec_free_func: Option<FunctionValue<'ctx>>,
+    vec_pop_func: Option<FunctionValue<'ctx>>,
+    // string cache
+    str_new_func: Option<FunctionValue<'ctx>>,
+    str_len_func: Option<FunctionValue<'ctx>>,
+    str_free_func: Option<FunctionValue<'ctx>>,
+    str_concat_func: Option<FunctionValue<'ctx>>,
+    str_get_char_ptr_func: Option<FunctionValue<'ctx>>,
 }
 
 impl<'a, 'ctx> Compiler<'a, 'ctx> {
@@ -206,6 +220,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             vec_len_func: None,
             vec_push_func: None,
             vec_free_func: None, // Init new caches
+            vec_pop_func: None,
+            str_new_func: None,
+            str_len_func: None,
+            str_free_func: None,
+            str_concat_func: None,
+            str_get_char_ptr_func: None,
         }
     }
 
@@ -224,6 +244,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         self.vec_len_func = None;
         self.vec_push_func = None;
         self.vec_free_func = None;
+        self.vec_pop_func = None;
+        self.str_new_func = None;
+        self.str_len_func = None;
+        self.str_free_func = None;
+        self.str_concat_func = None;
+        self.str_get_char_ptr_func = None;
+        self.current_function = None; // Reset current function
 
         // --- Declare Printf Early ---
         // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)
@@ -440,34 +467,49 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             }
 
             ExpressionKind::StringLiteral(value) => {
-                // 1. Create a global constant for the string literal's value
-                //    Use a unique name based on value? Or let LLVM handle duplicates?
-                //    Let's use a simple name for now. Need a better naming scheme later.
-                let global_name = format!("g_str_{}", self.module.get_globals().count()); // Simple unique name
+                // 1. Create global constant for the *initial value* only
+                let global_name = format!("g_init_str_{}", self.module.get_globals().count());
                 let global_val = self.create_global_string(&global_name, value, Linkage::Private);
-
-                // 2. Get the i8* pointer to the global string constant
                 let zero_idx = self.context.i32_type().const_int(0, false);
                 let string_type = global_val.get_value_type().into_array_type();
-                let ptr_val = match unsafe {
+                // 2. Get i8* pointer to the global constant data
+                let c_str_ptr = match unsafe {
                     self.builder.build_in_bounds_gep(
                         string_type,
                         global_val.as_pointer_value(),
                         &[zero_idx, zero_idx],
-                        "str_ptr",
+                        "init_str_ptr",
                     )
                 } {
-                    Ok(val) => val,
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(format!("GEP failed: {}", e), span))
+                    }
+                };
+                // 3. Call runtime _toylang_str_new(c_str_ptr)
+                let str_new_func = self.get_or_declare_str_new();
+                let str_handle = match self.builder.build_call(
+                    str_new_func,
+                    &[c_str_ptr.into()],
+                    "new_str_handle",
+                ) {
+                    Ok(call) => call
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or(CodeGenError::LlvmError(
+                            "Failed to get string handle from call".to_string(),
+                            span,
+                        ))?
+                        .into_pointer_value(), // i8* handle
                     Err(e) => {
                         return Err(CodeGenError::LlvmError(
-                            format!("LLVM error during string pointer generation: {}", e),
+                            format!("Call to _phoenix_str_new failed: {}", e),
                             span,
                         ))
                     }
                 };
-
-                // 3. A StringLiteral expression evaluates to the i8* pointer
-                Ok(ptr_val.into()) // Return PointerValue wrapped in BasicValueEnum
+                // 4. Expression evaluates to the string handle (i8*)
+                Ok(str_handle.into())
             }
 
             // Arithmetic Operations (Example: requires operands to be the same type for now)
@@ -475,9 +517,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 let lhs = self.compile_expression(left)?;
                 let rhs = self.compile_expression(right)?;
 
+                let lhs_type = left.get_type().unwrap_or(Type::Void); // Get type from AST node
+                let rhs_type = right.get_type().unwrap_or(Type::Void);
+
                 // Basic type checking (Replace with proper type checker later)
-                match (lhs, rhs) {
-                    (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
+                match (lhs_type, rhs_type, op) {
+                    (Type::Int, Type::Int, _) => {
+                        let l = lhs.into_int_value();
+                        let r = rhs.into_int_value();
                         let result = match match op {
                             BinaryOperator::Add => self.builder.build_int_add(l, r, "addtmp"),
                             BinaryOperator::Subtract => self.builder.build_int_sub(l, r, "subtmp"),
@@ -494,7 +541,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         };
                         Ok(result.into())
                     }
-                    (BasicValueEnum::FloatValue(l), BasicValueEnum::FloatValue(r)) => {
+                    (Type::Float, Type::Float, _) => {
+                        let l = lhs.into_float_value();
+                        let r = rhs.into_float_value();
                         let result = match match op {
                             BinaryOperator::Add => self.builder.build_float_add(l, r, "faddtmp"),
                             BinaryOperator::Subtract => self.builder.build_float_sub(l, r, "fsubtmp"),
@@ -510,6 +559,22 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             }
                         };
                         Ok(result.into())
+                    }
+                    (Type::String, Type::String, BinaryOperator::Add) => {
+                        let str_concat_func = self.get_or_declare_str_concat();
+                        let result_handle = match  self.builder.build_call(str_concat_func, &[lhs.into(), rhs.into()], "concat_str"){
+                            Ok(call) => call.try_as_basic_value().left().ok_or(CodeGenError::LlvmError(
+                                "Failed to get string handle from call".to_string(),
+                                span,
+                            ))?.into_pointer_value(), // i8* handle
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("Call to _phoenix_str_concat failed: {}", e),
+                                    span,
+                                ))
+                            }
+                        };
+                        Ok(result_handle.into()) // Result is new string handle (i8*)
                     }
                     _ => Err(CodeGenError::InvalidBinaryOperation(
                         format!("Type mismatch or unsupported types for operator {:?} (lhs: {:?}, rhs: {:?})", op, lhs.get_type(), rhs.get_type())
@@ -777,8 +842,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     let elem_val = self.compile_expression(&args[1])?;
                     let vec_handle_ptr = match vec_handle_val {
                         BasicValueEnum::PointerValue(pv)
-                        if pv.get_type()
-                            == self.context.i8_type().ptr_type(AddressSpace::default()) => {
+                            if pv.get_type()
+                                == self.context.i8_type().ptr_type(AddressSpace::default()) =>
+                        {
                             pv
                         }
                         _ => {
@@ -795,7 +861,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     // Allocate temp space for element, store it, get i8* pointer
                     let temp_alloca = match self
                         .builder
-                        .build_alloca(elem_val.get_type(), "push_val_alloca"){
+                        .build_alloca(elem_val.get_type(), "push_val_alloca")
+                    {
                         Ok(val) => val,
                         Err(e) => {
                             return Err(CodeGenError::LlvmError(
@@ -809,7 +876,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         temp_alloca,
                         self.context.i8_type().ptr_type(AddressSpace::default()),
                         "push_val_ptr",
-                    ){
+                    ) {
                         Ok(val) => val,
                         Err(e) => {
                             return Err(CodeGenError::LlvmError(
@@ -828,6 +895,142 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     );
 
                     Ok(self.context.f64_type().const_float(0.0).into()) // push returns "void" (0.0 float placeholder)
+                } else if name == "len" {
+                    // Arg 0 is vector or string handle (i8*)
+                    let handle_val = self.compile_expression(&args[0])?;
+                    let handle_ptr = match handle_val {
+                        BasicValueEnum::PointerValue(pv)
+                            if pv.get_type()
+                                == self.context.i8_type().ptr_type(AddressSpace::default()) =>
+                        {
+                            pv
+                        }
+                        _ => {
+                            return Err(CodeGenError::InvalidType(
+                                format!(
+                                    "Expected vector or string handle (i8*), found {:?}",
+                                    handle_val.get_type()
+                                ),
+                                span,
+                            ))
+                        }
+                    };
+                    // Call appropriate runtime length function
+                    // Assume type checker ensured arg is vec or string
+                    // We don't *actually* know here which it was without TC info!
+                    // HACK: Call str_len, assumes runtime handles both or TC passed info.
+                    let len_func = self.get_or_declare_str_len(); // Or vec_len
+                    let len_i64 =
+                        match self
+                            .builder
+                            .build_call(len_func, &[handle_ptr.into()], "len")
+                        {
+                            Ok(call) => call
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or(CodeGenError::LlvmError(
+                                    "Failed to get length from call".to_string(),
+                                    span,
+                                ))?
+                                .into_int_value(), // i64 length
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("Call to _phoenix_str_len failed: {}", e),
+                                    span,
+                                ))
+                            }
+                        };
+                    Ok(len_i64.into()) // len returns Int
+                }
+                // --- Built-in pop ---
+                else if name == "pop" {
+                    // Arg 0 is vector handle (i8*)
+                    let vec_handle_val = self.compile_expression(&args[0])?;
+                    let vec_handle_ptr = match vec_handle_val {
+                        BasicValueEnum::PointerValue(pv)
+                            if pv.get_type() == self.context.ptr_type(AddressSpace::default()) =>
+                        {
+                            pv
+                        }
+                        _ => {
+                            return Err(CodeGenError::InvalidType(
+                                format!(
+                                    "Expected vector handle (i8*), found {:?}",
+                                    vec_handle_val.get_type()
+                                ),
+                                span,
+                            ))
+                        }
+                    };
+
+                    // Get Element Type (Needs info passed from Type Checker!)
+                    let vec_expr_node = &args[0]; // The AST node for the vector expression
+                    let vec_resolved_type = vec_expr_node.get_type();
+                    let elem_toy_type = match vec_resolved_type {
+                        Some(Type::Vector(et)) => *et,
+                        _ => {
+                            return Err(CodeGenError::InvalidType(
+                                format!("Expected vector type, found {:?}", vec_resolved_type),
+                                span,
+                            ))
+                        }
+                    };
+                    let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
+
+                    // Call runtime vec_pop(handle) -> i8* (pointer to popped data)
+                    let vec_pop_func = self.get_or_declare_vec_pop();
+                    let popped_elem_ptr_i8 = match self.builder.build_call(
+                        vec_pop_func,
+                        &[vec_handle_ptr.into()],
+                        "pop_ptr_i8",
+                    ) {
+                        Ok(call) => call
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or(CodeGenError::LlvmError(
+                                "Failed to get popped element pointer from call".to_string(),
+                                span.clone(),
+                            ))?
+                            .into_pointer_value(), // i8* handle
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("Call to _phoenix_vec_pop failed: {}", e),
+                                span.clone(),
+                            ))
+                        }
+                    };
+                    // TODO: Check for null return from pop (empty vector)
+
+                    // Cast the i8* to the correct element type pointer
+                    let elem_ptr_typed = match self.builder.build_pointer_cast(
+                        popped_elem_ptr_i8,
+                        elem_llvm_type.ptr_type(AddressSpace::default()),
+                        "pop_ptr_typed",
+                    ) {
+                        Ok(val) => val,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("LLVM error during pointer cast: {}", e),
+                                span,
+                            ))
+                        }
+                    };
+                    // Load the value from that pointer
+                    let popped_value =
+                        match self
+                            .builder
+                            .build_load(elem_llvm_type, elem_ptr_typed, "pop_val")
+                        {
+                            Ok(val) => val,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during load: {}", e),
+                                    span,
+                                ))
+                            }
+                        };
+
+                    Ok(popped_value) // Pop returns the element value
                 }
                 // --- User Function Call ---
                 else {
@@ -1475,63 +1678,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
     // Helper to get or declare the print_str_ln wrapper function
     fn get_or_declare_print_str_ln_wrapper(&mut self) -> Result<FunctionValue<'ctx>, CodeGenError> {
-        // Return cached function if available
-        if let Some(func) = self.print_str_ln_wrapper_func {
-            return Ok(func);
-        }
+        if let Some(f) = self.print_str_ln_wrapper_func {
+            return Ok(f);
+        } // Check cache
 
-        // Get the print_str wrapper first
-        let str_wrapper = self.get_or_declare_print_str_wrapper()?;
+        // Signature: void print_str_ln_wrapper_func()
+        let void_type = self.context.void_type();
+        let fn_type = void_type.fn_type(&[], false);
 
-        // Create print_str_ln wrapper with no parameters (just prints a newline)
-        let fn_type = self.context.void_type().fn_type(&[], false);
-        let function = self
+        let func = self
             .module
-            .add_function("print_str_ln_wrapper", fn_type, None);
-        let entry_bb = self.context.append_basic_block(function, "entry");
-
-        // Save current position
-        let current_block = self.builder.get_insert_block();
-
-        // Position at the wrapper function's entry block
-        self.builder.position_at_end(entry_bb);
-
-        // Create global string once (inside the wrapper function)
-        let global_val = self.create_global_string("g_newline_constant", "\n", Linkage::Private);
-
-        // Get pointer to the global string
-        let zero_idx = self.context.i32_type().const_int(0, false);
-        let string_type = global_val.get_value_type().into_array_type();
-        let ptr_val = unsafe {
-            self.builder.build_in_bounds_gep(
-                string_type,
-                global_val.as_pointer_value(),
-                &[zero_idx, zero_idx],
-                "newline_ptr",
-            )
-        }
-        .map_err(|e| {
-            CodeGenError::LlvmError(
-                format!("LLVM error during newline pointer generation: {}", e),
-                Span::default(),
-            )
-        })?;
-
-        // Call print_str with the newline
-        self.builder.build_call(str_wrapper, &[ptr_val.into()], "");
-
-        // Return from wrapper
-        self.builder.build_return(None);
-
-        // Restore original position
-        if let Some(block) = current_block {
-            self.builder.position_at_end(block);
-        }
-
-        // Cache the function
-        self.print_str_ln_wrapper_func = Some(function);
-
-        Ok(function)
+            .add_function("print_str_ln_wrapper_func", fn_type, Some(Linkage::External));
+        self.print_str_ln_wrapper_func = Some(func); // Store in cache
+        Ok(func)
     }
 
     // Declare helper for vec_new
@@ -1606,6 +1765,84 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         func
     }
 
+    fn get_or_declare_vec_pop(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.vec_pop_func {
+            return f;
+        }
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = i8ptr_t.fn_type(&[i8ptr_t.into()], false); // i8* -> i8*
+        let func = self
+            .module
+            .add_function(RUNTIME_VEC_POP, fn_type, Some(Linkage::External));
+        self.vec_pop_func = Some(func);
+        func
+    }
+    fn get_or_declare_str_new(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.str_new_func {
+            return f;
+        }
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = i8ptr_t.fn_type(&[i8ptr_t.into()], false); // i8* -> i8* handle
+        let func = self
+            .module
+            .add_function(RUNTIME_STR_NEW, fn_type, Some(Linkage::External));
+        self.str_new_func = Some(func);
+        func
+    }
+    fn get_or_declare_str_len(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.str_len_func {
+            return f;
+        }
+        let i64_t = self.context.i64_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = i64_t.fn_type(&[i8ptr_t.into()], false); // i8* -> i64
+        let func = self
+            .module
+            .add_function(RUNTIME_STR_LEN, fn_type, Some(Linkage::External));
+        self.str_len_func = Some(func);
+        func
+    }
+    fn get_or_declare_str_concat(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.str_concat_func {
+            return f;
+        }
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = i8ptr_t.fn_type(&[i8ptr_t.into(), i8ptr_t.into()], false); // i8*, i8* -> i8* handle
+        let func = self
+            .module
+            .add_function(RUNTIME_STR_CONCAT, fn_type, Some(Linkage::External));
+        self.str_concat_func = Some(func);
+        func
+    }
+
+    fn get_or_declare_str_free(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.str_free_func {
+            return f;
+        }
+        let void_t = self.context.void_type();
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = void_t.fn_type(&[i8ptr_t.into()], false); // i8* -> void
+        let func = self
+            .module
+            .add_function(RUNTIME_STR_FREE, fn_type, Some(Linkage::External));
+        self.str_free_func = Some(func);
+        func
+    }
+
+    // RUNTIME_STR_GET_CHAR_PTR
+    fn get_or_declare_str_get_char_ptr(&mut self) -> FunctionValue<'ctx> {
+        if let Some(f) = self.str_get_char_ptr_func {
+            return f;
+        }
+        let i8ptr_t = self.context.i8_type().ptr_type(AddressSpace::default());
+        let fn_type = i8ptr_t.fn_type(&[i8ptr_t.into()], false); // i8* -> i8*
+        let func =
+            self.module
+                .add_function(RUNTIME_STR_GET_CHAR_PTR, fn_type, Some(Linkage::External));
+        self.str_get_char_ptr_func = Some(func);
+        func
+    }
+
     // Get size of a phoenix Type in bytes (basic implementation)
     fn get_sizeof(&self, ty: &Type) -> Option<u64> {
         // This needs target machine data layout ideally! Hardcoding for now. Assumes 64-bit.
@@ -1630,9 +1867,17 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 type_ann,
                 value,
             } => {
-                // Compile the value expression
-                let compiled_value = self.compile_expression(value)?;
-                self.compile_var_let_stmt(name, type_ann, compiled_value, false, span)
+                // Call helper with the determined type
+                self.compile_var_let_stmt(name, value, false, span, type_ann)
+            }
+
+            StatementKind::VarBinding {
+                name,
+                type_ann,
+                value,
+            } => {
+                // Call helper with the determined type
+                self.compile_var_let_stmt(name, value, true, span, type_ann)
             }
 
             // --- Return Statement ---
@@ -1662,18 +1907,6 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // Alternative: Could return a special marker? But None seems okay.
                 // The block terminator check in loops/if should handle this.
             } // End ReturnStmt
-
-            StatementKind::VarBinding {
-                name,
-                type_ann,
-                value,
-            } => {
-                // Compile the value expression
-                let compiled_value = self.compile_expression(value)?;
-
-                // Let statement yields no value itself
-                self.compile_var_let_stmt(name, type_ann, compiled_value, true, span)
-            }
 
             StatementKind::ExpressionStmt(expr) => {
                 // Compile the expression, result might be any basic type
@@ -2071,61 +2304,106 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     fn compile_var_let_stmt(
         &mut self,
         name: &String,
-        type_ann: &Option<TypeNode>,
-        compiled_value: BasicValueEnum,
+        value: &Expression,
         is_mutable: bool,
-        span: Span
+        span: Span,
+        type_ann: &Option<TypeNode>,
     ) -> CompileStmtResult<'ctx> {
-        // convert type_ann: TypeNode to Type with type_node_to_type
-        let type_ann = match type_ann {
-            Some(type_node) => Some(type_node_to_type(type_node)),
-            None => None, // Default to Float if no type annotation
-        };
-        // Determine the type: from annotation or inferred (basic inference for now)
-        let var_type = match type_ann {
-            Some(ann_ty) => {
-                // TODO: Check if compiled_value type matches ann_ty (or is convertible)
-                ann_ty.clone()
-            }
-            None => {
-                // Basic inference from value (replace with proper type checker)
-                match compiled_value {
-                    BasicValueEnum::IntValue(iv) => {
-                        if iv.get_type().get_bit_width() == 1 {
-                            Type::Bool
-                        } else {
-                            Type::Int
+        // Compile the value expression first
+        let compiled_value = self.compile_expression(value)?;
+
+        // --- Determine Variable Type ---
+        // Use the type resolved by the type checker stored on the value expression node
+        let var_type = match value.get_type() {
+            // Use helper to get Option<Type>
+            Some(ty) => {
+                // Type checker ran successfully, use the resolved type.
+                // Optional: Double-check against type_ann if it exists?
+                if let Some(ann_node) = type_ann {
+                    // Resolve annotation node again (or better, pass resolved Type from TC)
+                    if let Some(ann_type) = resolve_type_node(ann_node, &mut vec![]) {
+                        // Dummy errors vec
+                        if ty != ann_type {
+                            // This signals an internal inconsistency if TC passed!
+                            return Err(CodeGenError::InvalidType(
+                                format!("Internal Error: Inferred value type {} mismatches annotation {} for '{}'", ty, ann_type, name),
+                                span
+                            ));
                         }
-                    }
-                    BasicValueEnum::FloatValue(_) => Type::Float,
-                    _ => {
-                        return Err(CodeGenError::InvalidType(
-                            format!(
-                                "Cannot infer type for let binding [internal] [{}:{}]",
-                                file!(),
-                                line!()
-                            ),
-                            span,
-                        ))
+                    } else { /* Error resolving annotation - should be caught by TC */
                     }
                 }
+                ty // Use the type from the value expression
+            }
+            None => {
+                // This means the type checker failed to resolve the value's type.
+                // This shouldn't happen if the type checker ran successfully first.
+                return Err(CodeGenError::InvalidType(
+                    format!(
+                        "Internal Error: Could not determine type for RHS of binding '{}'",
+                        name
+                    ),
+                    value.span.clone(), // Use value's span
+                ));
+            }
+        };
+        // --- End Determine Variable Type ---
+
+        // Ensure we are not binding void
+        if var_type == Type::Void {
+            return Err(CodeGenError::InvalidType(
+                format!("Cannot declare variable '{}' with void type", name),
+                span, // Use statement span
+            ));
+        }
+        // --- Type Check (Codegen sanity check) ---
+        // The type checker should ensure this, but a check here is defensive.
+        let expected_llvm_type = match var_type.to_llvm_basic_type(self.context) {
+            Some(t) => t,
+            None if var_type == Type::Void => {
+                // This error should have been caught by type checker (VoidAssignment)
+                return Err(CodeGenError::InvalidType(
+                    "Cannot create variable of type void".to_string(),
+                    span,
+                ));
+            }
+            None => {
+                // Should not happen for valid storable types
+                return Err(CodeGenError::InvalidType(
+                    format!("Cannot get basic LLVM type for variable type {}", var_type),
+                    span,
+                ));
             }
         };
 
-        // Allocate based on determined type
+        if compiled_value.get_type() != expected_llvm_type {
+            // This indicates an internal error OR missing type conversion step
+            return Err(CodeGenError::InvalidType(
+                format!(
+                    "Internal Error: RHS value type {:?} does not match variable type {:?} for '{}'",
+                    compiled_value.get_type(), expected_llvm_type, name
+                ),
+                span
+            ));
+        }
+        // --- End Type Check ---
+
+        // Allocate based on the determined type passed in
         let alloca = self.create_entry_block_alloca(name, var_type.clone());
         self.builder.build_store(alloca, compiled_value);
+
         // Store type info along with pointer
         self.variables.insert(
             name.clone(),
             VariableInfo {
                 ptr: alloca,
-                ty: var_type,
+                ty: var_type, // Use the passed-in type
                 is_mutable,
             },
         );
-        Ok((None, false)) // Let statement yields no value itself
+        Ok((None, false)) // Binding statement yields no value, doesn't terminate block
     }
+
     // End compile_statement
 
     /// Emits the compiled module to an object file.
@@ -2195,5 +2473,23 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             })?;
 
         Ok(())
+    }
+}
+// Need resolve_type_node helper accessible here or pass resolved type differently
+// Placeholder - assumes resolve_type_node is available or move logic
+pub fn resolve_type_node(node: &TypeNode, _errors: &mut Vec<CodeGenError>) -> Option<Type> {
+    // Minimal version for codegen context - real logic is in typechecker
+    match &node.kind {
+        TypeNodeKind::Simple(name) => match name.as_str() {
+            "int" => Some(Type::Int),
+            "float" => Some(Type::Float),
+            "bool" => Some(Type::Bool),
+            "string" => Some(Type::String),
+            "void" => Some(Type::Void),
+            _ => None,
+        },
+        TypeNodeKind::Vector(et_node) => {
+            resolve_type_node(et_node, _errors).map(|t| Type::Vector(Box::new(t)))
+        }
     }
 }

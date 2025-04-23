@@ -1,8 +1,8 @@
 // src/typechecker.rs
 
 use crate::ast::{
-    ComparisonOperator, Expression, ExpressionKind, Program, Statement, StatementKind, TypeNode,
-    TypeNodeKind, UnaryOperator,
+    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, Program, Statement,
+    StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
 };
 use crate::location::{Location, Span};
 use crate::symbol_table::{FunctionSignature, SymbolInfo, SymbolTable};
@@ -431,8 +431,7 @@ impl TypeChecker {
                 let signature = signature.unwrap();
 
                 self.symbol_table.enter_scope(); // Enter function scope
-                self
-                    .current_function_return_type
+                self.current_function_return_type
                     .replace(signature.return_type);
 
                 // Resolve param/return types from TypeNodes
@@ -767,11 +766,30 @@ impl TypeChecker {
             ExpressionKind::BinaryOp { op, left, right } => {
                 let left_type_opt = self.check_expression(left);
                 let right_type_opt = self.check_expression(right);
-                match (left_type_opt, right_type_opt) {
-                    (Some(Type::Int), Some(Type::Int)) => Some(Type::Int),
-                    (Some(Type::Float), Some(Type::Float)) => Some(Type::Float),
-                    (Some(lt), Some(rt)) => {
-                        // Mismatch or non-numeric
+                match (left_type_opt, right_type_opt, op) {
+                    // Arithmetic
+                    (
+                        Some(Type::Int),
+                        Some(Type::Int),
+                        BinaryOperator::Add
+                        | BinaryOperator::Subtract
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide,
+                    ) => Some(Type::Int),
+                    (
+                        Some(Type::Float),
+                        Some(Type::Float),
+                        BinaryOperator::Add
+                        | BinaryOperator::Subtract
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide,
+                    ) => Some(Type::Float),
+                    // --- String Concatenation ---
+                    (Some(Type::String), Some(Type::String), BinaryOperator::Add) => {
+                        Some(Type::String)
+                    } // '+' means concat for strings
+                    // --- Errors ---
+                    (Some(lt), Some(rt), _) => {
                         self.errors.push(TypeError::InvalidOperation {
                             op: format!("{:?}", op),
                             type_info: format!("{} and {}", lt, rt),
@@ -786,26 +804,33 @@ impl TypeChecker {
                 let left_type_opt = self.check_expression(left);
                 let right_type_opt = self.check_expression(right);
                 match (left_type_opt, right_type_opt) {
-                    (Some(lt @ Type::Int), Some(Type::Int)) => Some(Type::Bool),
-                    (Some(lt @ Type::Float), Some(Type::Float)) => Some(Type::Bool),
-                    (Some(lt @ Type::Bool), Some(Type::Bool))
-                        if matches!(
-                            op,
-                            ComparisonOperator::Equal | ComparisonOperator::NotEqual
-                        ) =>
-                    {
-                        Some(Type::Bool)
-                    }
                     (Some(lt), Some(rt)) => {
-                        // Mismatch or invalid op
-                        self.errors.push(TypeError::InvalidOperation {
-                            op: format!("{:?}", op),
-                            type_info: format!("{} and {}", lt, rt),
-                            span,
-                        });
-                        None
+                        // Allow comparing identical types (int, float, bool, string for ==/!=)
+                        if lt != rt || lt == Type::Void {
+                            self.errors.push(TypeError::InvalidOperation {
+                                op: format!("{:?}", op),
+                                type_info: format!("{} and {}", lt, rt),
+                                span,
+                            });
+                            None
+                        } else if lt == Type::String
+                            && !matches!(
+                                op,
+                                ComparisonOperator::Equal | ComparisonOperator::NotEqual
+                            )
+                        {
+                            // String comparison only allowed for == and !=
+                            self.errors.push(TypeError::InvalidOperation {
+                                op: format!("{:?}", op),
+                                type_info: format!("{} and {}", lt, rt),
+                                span,
+                            });
+                            None
+                        } else {
+                            Some(Type::Bool)
+                        }
                     }
-                    _ => None, // Error in operand(s)
+                    _ => None,
                 }
             }
             ExpressionKind::UnaryOp { op, operand } => {
@@ -883,6 +908,59 @@ impl TypeChecker {
                     } // Else: error checking vector arg already recorded
 
                     Some(Type::Void) // Assume push returns Void
+                } else if name == "len" {
+                    if args.len() != 1 {
+                        self.errors.push(TypeError::IncorrectArgCount {
+                            func_name: name.clone(),
+                            expected: 1,
+                            found: args.len(),
+                            call_site: span,
+                        });
+                        Some(Type::Int)
+                    }
+                    // len returns int, return type even on error?
+                    else {
+                        let target_type = self.check_expression(&args[0]);
+                        match target_type {
+                            // len works on Vector and String
+                            Some(Type::Vector(_)) | Some(Type::String) => Some(Type::Int),
+                            Some(other) => {
+                                self.errors.push(TypeError::InvalidOperation {
+                                    op: "len".to_string(),
+                                    type_info: format!("{}", other),
+                                    span,
+                                });
+                                None
+                            }
+                            None => None, // Error checking arg
+                        }
+                    }
+                } else if name == "pop" {
+                    if args.len() != 1 {
+                        self.errors.push(TypeError::IncorrectArgCount {
+                            func_name: name.clone(),
+                            expected: 1,
+                            found: args.len(),
+                            call_site: span,
+                        });
+                        Some(Type::Void)
+                    }
+                    // Pop returns element type or Void on error? Let's use Void on error.
+                    else {
+                        let target_type = self.check_expression(&args[0]);
+                        match target_type {
+                            Some(Type::Vector(elem_type)) => Some(*elem_type), // Pop returns element type
+                            Some(other) => {
+                                self.errors.push(TypeError::InvalidOperation {
+                                    op: "pop".to_string(),
+                                    type_info: format!("{}", other),
+                                    span,
+                                });
+                                None
+                            }
+                            None => None, // Error checking arg
+                        }
+                    }
                 }
                 // --- User Functions ---
                 else {
