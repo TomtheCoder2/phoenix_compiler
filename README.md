@@ -56,7 +56,7 @@ main();
 
 ```bash
 # Build the compiler
-cargo build -p phoenix_runtime -r; 
+cargo build -p phoenix_runtime -r
 cargo build -r
 
 # Compile a Phoenix file
@@ -80,7 +80,7 @@ Phoenix is under active development. Recent additions include:
 - [x] String as a first-class type
 - [ ] Multi-file support
 - [ ] Structs and classes
-- [ ] Logical operators (`&&` and `||`)
+- [x] Logical operators (`&&` and `||`)
   - a && b: If a evaluates to false, b is not evaluated, and the result is false.
   - a || b: If a evaluates to true, b is not evaluated, and the result is true.
 - [ ] Functions as variables
