@@ -1037,4 +1037,89 @@ mod tests {
             _ => panic!("Expected ExpressionStmt"),
         }
     }
+
+    #[test]
+    fn test_parse_nested_vec_type_annotation() {
+        let input = "let matrix: vec<vec<int>> = [];";
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::LetBinding { type_ann, .. } => {
+                assert!(type_ann.is_some());
+                let type_node = type_ann.as_ref().unwrap();
+                match &type_node.kind {
+                    TypeNodeKind::Vector(inner_node) => match &inner_node.kind {
+                        TypeNodeKind::Vector(inner_inner_node) => match &inner_inner_node.kind {
+                            TypeNodeKind::Simple(name) => assert_eq!(name, "int"),
+                            _ => panic!("Innermost type not Simple(int)"),
+                        },
+                        _ => panic!("Inner type not Vector"),
+                    },
+                    _ => panic!("Outermost type not Vector"),
+                }
+            }
+            _ => panic!("Expected LetBinding"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_vector_literal() {
+        let input = "[[1, 2], [3]];"; // vec<vec<int>> literal
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::VectorLiteral { elements } => {
+                    assert_eq!(elements.len(), 2);
+                    assert!(matches!(
+                        elements[0].kind,
+                        ExpressionKind::VectorLiteral { .. }
+                    ));
+                    assert!(matches!(
+                        elements[1].kind,
+                        ExpressionKind::VectorLiteral { .. }
+                    ));
+                    // Check inner elements if needed
+                }
+                _ => panic!("Expected VectorLiteral"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nested_index_access() {
+        let input = "matrix[0][1];"; // Chained indexing
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::IndexAccess { target, index } => {
+                    // Check index is IntLiteral(1)
+                    assert!(matches!(index.kind, ExpressionKind::IntLiteral(1)));
+                    // Check target is *another* IndexAccess: matrix[0]
+                    match &target.kind {
+                        ExpressionKind::IndexAccess {
+                            target: matrix_var,
+                            index: index0,
+                        } => {
+                            assert!(
+                                matches!(matrix_var.kind, ExpressionKind::Variable(ref name) if name == "matrix")
+                            );
+                            assert!(matches!(index0.kind, ExpressionKind::IntLiteral(0)));
+                        }
+                        _ => panic!("Target of outer index not IndexAccess"),
+                    }
+                }
+                _ => panic!("Expected outer IndexAccess"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
 }

@@ -1,6 +1,9 @@
 // src/typechecker.rs
 
-use crate::ast::{BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator};
+use crate::ast::{
+    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program,
+    Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
+};
 use crate::location::{Location, Span};
 use crate::symbol_table::{FunctionSignature, SymbolInfo, SymbolTable};
 use crate::types::Type;
@@ -332,21 +335,27 @@ impl TypeChecker {
         match &statement.kind {
             StatementKind::ExpressionStmt(expr) => {
                 // Check expression for side effects and errors, ignore resulting type
-                let _ = self.check_expression(expr);
+                let _ = self.check_expression(expr, None);
             }
             StatementKind::LetBinding {
                 name,
                 type_ann,
                 value,
             } => {
-                self.check_binding(name, type_ann, value, false, span); // is_mutable = false
+                let annotation_type: Option<Type> = type_ann
+                    .as_ref()
+                    .and_then(|node| self.resolve_type_node(node));
+                self.check_binding(name, &annotation_type, value, false, span); // is_mutable = false
             }
             StatementKind::VarBinding {
                 name,
                 type_ann,
                 value,
             } => {
-                self.check_binding(name, type_ann, value, true, span); // is_mutable = true
+                let annotation_type: Option<Type> = type_ann
+                    .as_ref()
+                    .and_then(|node| self.resolve_type_node(node));
+                self.check_binding(name, &annotation_type, value, true, span); // is_mutable = true
             }
             StatementKind::IfStmt {
                 condition,
@@ -354,7 +363,7 @@ impl TypeChecker {
                 else_branch,
             } => {
                 // Check condition is bool
-                match self.check_expression(condition) {
+                match self.check_expression(condition, None) {
                     Some(Type::Bool) => {} // OK
                     Some(other_type) => self
                         .errors
@@ -374,7 +383,7 @@ impl TypeChecker {
             }
             StatementKind::WhileStmt { condition, body } => {
                 // Check condition is bool
-                match self.check_expression(condition) {
+                match self.check_expression(condition, None) {
                     Some(Type::Bool) => {}
                     Some(other_type) => self
                         .errors
@@ -398,7 +407,7 @@ impl TypeChecker {
                     self.check_statement(init_expr);
                 }
                 if let Some(cond_expr) = condition {
-                    match self.check_expression(cond_expr) {
+                    match self.check_expression(cond_expr, None) {
                         Some(Type::Bool) | None => {} // Allow None if error during check
                         Some(other) => self.errors.push(TypeError::InvalidConditionType(
                             other,
@@ -408,7 +417,7 @@ impl TypeChecker {
                 }
                 // Check increment *after* body check? Doesn't matter much here.
                 if let Some(incr_expr) = increment {
-                    self.check_expression(incr_expr);
+                    self.check_expression(incr_expr, None);
                 }
                 // Check body
                 let _ = self.check_program_block(body);
@@ -517,12 +526,12 @@ impl TypeChecker {
                     (Some(expr), Type::Void) => {
                         // Error: Returning a value from void function
                         // Still check the expression itself for errors though
-                        let _ = self.check_expression(expr);
+                        let _ = self.check_expression(expr, None);
                         self.errors.push(TypeError::ReturnValueFromVoid(span));
                     }
                     (Some(expr), expected_type) => {
                         // Check the expression and its type
-                        if let Some(found_type) = self.check_expression(expr) {
+                        if let Some(found_type) = self.check_expression(expr, None) {
                             if found_type == Type::Void {
                                 // Cannot return result of a void expression (e.g. return print(x);)
                                 self.errors.push(TypeError::ReturnTypeMismatch {
@@ -549,14 +558,17 @@ impl TypeChecker {
     fn check_binding(
         &mut self,
         name: &str,
-        type_ann_node: &Option<TypeNode>,
+        annotation_type: &Option<Type>, // Pass resolved Option<Type>
         value: &Expression,
         is_mutable: bool,
         stmt_span: Span,
     ) {
-        let Some(value_type) = self.check_expression(value) else {
+        // Pass annotation type as the expected type for the value expression check
+        let value_type_opt = self.check_expression(value, annotation_type.clone()); // Pass Option<Type>
+        let Some(value_type) = value_type_opt else {
             return;
-        };
+        }; // Error checking value
+
         if value_type == Type::Void {
             // Cannot infer variable type from void
             self.errors.push(TypeError::VoidAssignment(
@@ -566,18 +578,13 @@ impl TypeChecker {
             return;
         }
 
-        // Resolve annotation type
-        let annotation_type: Option<Type> = type_ann_node
-            .as_ref()
-            .and_then(|node| resolve_type_node(node, &mut self.errors)); // Resolve TypeNode
-
         // Determine expected type & check match
         let expected_type = match annotation_type {
             Some(ann_ty) => {
                 // Check if value type matches annotation
                 // TODO: Handle vector literal type inference/checking against annotation
-                if value_type != ann_ty
-                    && !self.check_vector_literal_assignment(&value_type, &ann_ty)
+                if value_type != *ann_ty
+                    && !self.check_vector_literal_assignment(&value_type, &ann_ty, value.span.clone())
                 {
                     self.errors.push(TypeError::TypeMismatch {
                         expected: ann_ty.clone(),
@@ -588,12 +595,12 @@ impl TypeChecker {
                 }
                 ann_ty
             }
-            None => value_type, // Infer from value
+            None => &value_type, // Infer from value
         };
 
         // Define variable
         let info = SymbolInfo {
-            ty: expected_type,
+            ty: expected_type.clone(),
             is_mutable,
             def_span: stmt_span.clone(),
         };
@@ -606,20 +613,31 @@ impl TypeChecker {
         }
     }
 
-    // Helper to check if value_type (potentially Vector(Unknown)) can be assigned to ann_ty (Vector(T))
-    // Placeholder - needs proper inference for vector literals.
-    fn check_vector_literal_assignment(&self, value_type: &Type, ann_ty: &Type) -> bool {
-        // Basic check: if annotation is vec<T>, value must be compatible vec
-        // This needs the check_expression for VectorLiteral to potentially return a special
-        // type like Vector(Unknown) or Vector(Inferred(T)) if elements are consistent.
-        // For now, assume check_expression infers correctly.
-        // todo fix
-        value_type == ann_ty
+    // Recursive helper for vector assignment check (needs refinement)
+    // todo: Handle empty vector literal assignment
+    fn check_vector_literal_assignment(
+        &self,
+        value_type: &Type,
+        ann_ty: &Type,
+        _value_span: Span,
+    ) -> bool {
+        match (value_type, ann_ty) {
+            // Allow assigning vec<T> lit to vec<T> var
+            (Type::Vector(val_et), Type::Vector(ann_et)) => val_et == ann_et,
+            // Add special case for empty literal [] assigned to vec<T>?
+            // If value_type comes back as some special "UnknownVector" type?
+            // This depends on how check_expression handles empty literals now.
+            _ => value_type == ann_ty, // Default check
+        }
     }
 
     /// Check an expression and return its determined Type or None if error.
     /// Errors are pushed to self.errors.
-    fn check_expression(&mut self, expression: &Expression) -> Option<Type> {
+    fn check_expression(
+        &mut self,
+        expression: &Expression,
+        expected_type: Option<Type>, // Added: Contextual expected type
+    ) -> Option<Type> {
         let span = expression.span.clone();
         let maybe_type: Option<Type> = match &expression.kind {
             // ... Literals, Variable (use symbol_table.lookup_variable) ...
@@ -637,10 +655,17 @@ impl TypeChecker {
                     })
             }
             ExpressionKind::Assignment { target, value } => {
-                // Check the type of the RHS first
-                let Some(value_type) = self.check_expression(value) else {
+                // Check target first to know expected type for value
+                let target_type_opt = self.check_lvalue_expression(target); // Check target validity/type
+                let Some(target_type) = target_type_opt else {
                     return None;
                 };
+
+                // Check value against target type
+                let value_type_opt = self.check_expression(value, Some(target_type)); // Pass target type as expected
+                let Some(value_type) = value_type_opt else {
+                    return None;
+                }; // Error checking value
                 if value_type == Type::Void {
                     self.errors.push(TypeError::VoidAssignment(
                         target.to_code(),
@@ -648,121 +673,11 @@ impl TypeChecker {
                     ));
                     return None;
                 }
-
-                // --- Check L-value Target ---
-                match &target.kind {
-                    // Case 1: Simple variable assignment
-                    ExpressionKind::Variable(name) => {
-                        let target_info = match self.symbol_table.lookup_variable(name) {
-                            Some(info) => info,
-                            None => {
-                                self.errors
-                                    .push(TypeError::UndefinedVariable(name.clone(), span));
-                                return None;
-                            }
-                        };
-                        if !target_info.is_mutable {
-                            self.errors.push(TypeError::AssignmentToImmutable(
-                                name.clone(),
-                                target.span.clone(),
-                            ));
-                            return None;
-                        }
-                        if target_info.ty != value_type {
-                            self.errors.push(TypeError::TypeMismatch {
-                                expected: target_info.ty.clone(),
-                                found: value_type,
-                                context: format!("variable '{}'", name),
-                                span: value.span.clone(),
-                            });
-                            return None;
-                        }
-                        Some(value_type) // Assign yields value type
-                    }
-                    // Case 2: Index assignment: vec[idx] = value
-                    ExpressionKind::IndexAccess {
-                        target: vec_expr,
-                        index,
-                    } => {
-                        // Check index type
-                        let Some(index_type) = self.check_expression(index) else {
-                            return None;
-                        };
-                        if index_type != Type::Int {
-                            self.errors
-                                .push(TypeError::IndexNotInteger(index_type, span));
-                            /* Maybe continue? */
-                        }
-
-                        // Check target is a vector and mutable (indirectly?)
-                        // We need to know if the *vector handle itself* refers to something mutable.
-                        // Let's assume for now if the variable holding the vector is `var`, we can mutate element.
-                        // This check needs refinement based on ownership/borrowing if added later.
-                        let Some(target_type) = self.check_expression(vec_expr) else {
-                            return None;
-                        };
-
-                        match target_type {
-                            Type::Vector(elem_type) => {
-                                // Check if vec_expr is assignable (e.g., if it's a 'var')
-                                // Simple check: If vec_expr is just a Variable, check its mutability.
-                                if let ExpressionKind::Variable(var_name) = &vec_expr.kind {
-                                    if let Some(info) = self.symbol_table.lookup_variable(var_name)
-                                    {
-                                        if !info.is_mutable {
-                                            self.errors.push(TypeError::AssignmentToImmutable(
-                                                format!("{}[...]", var_name),
-                                                target.span.clone(),
-                                            ));
-                                            // Fallthrough to check types anyway? Or return None? Let's return None.
-                                            return None;
-                                        }
-                                    } // Else: UndefinedVariable already caught
-                                }
-                                // Else: Assigning to complex expr index? Disallow for now.
-                                else {
-                                    self.errors.push(TypeError::InvalidAssignmentTarget(
-                                        target.to_code(),
-                                        vec_expr.span.clone(),
-                                    ));
-                                    return None;
-                                }
-
-                                // Check if value type matches vector element type
-                                if *elem_type != value_type {
-                                    self.errors.push(TypeError::TypeMismatch {
-                                        expected: *elem_type,
-                                        found: value_type,
-                                        context: "index assignment".to_string(),
-                                        span: value.span.clone(),
-                                    });
-                                    return None;
-                                }
-                                // Index assignment expression yields the assigned value's type
-                                Some(value_type)
-                            }
-                            _ => {
-                                self.errors.push(TypeError::AssignIndexTargetNotVector(
-                                    target_type,
-                                    vec_expr.span.clone(),
-                                ));
-                                None
-                            }
-                        }
-                    }
-                    // Invalid L-value (e.g., literal = value)
-                    _ => {
-                        self.errors.push(TypeError::InvalidAssignmentTarget(
-                            target.to_code(),
-                            target.span.clone(),
-                        ));
-                        None
-                    }
-                } // End match target.kind
+                Some(value_type)
             }
             ExpressionKind::BinaryOp { op, left, right } => {
-                let left_type_opt = self.check_expression(left);
-                let right_type_opt = self.check_expression(right);
+                let left_type_opt = self.check_expression(left, None);
+                let right_type_opt = self.check_expression(right, None);
                 match (left_type_opt, right_type_opt, op) {
                     // Arithmetic
                     (
@@ -798,8 +713,8 @@ impl TypeChecker {
                 }
             }
             ExpressionKind::ComparisonOp { op, left, right } => {
-                let left_type_opt = self.check_expression(left);
-                let right_type_opt = self.check_expression(right);
+                let left_type_opt = self.check_expression(left, None);
+                let right_type_opt = self.check_expression(right, None);
                 match (left_type_opt, right_type_opt) {
                     (Some(lt), Some(rt)) => {
                         // Allow comparing identical types (int, float, bool, string for ==/!=)
@@ -831,7 +746,7 @@ impl TypeChecker {
                 }
             }
             ExpressionKind::UnaryOp { op, operand } => {
-                let operand_type_opt = self.check_expression(operand);
+                let operand_type_opt = self.check_expression(operand, None);
                 match (op, operand_type_opt) {
                     (UnaryOperator::Negate, Some(Type::Int)) => Some(Type::Int),
                     (UnaryOperator::Negate, Some(Type::Float)) => Some(Type::Float),
@@ -848,9 +763,12 @@ impl TypeChecker {
                 }
             }
             ExpressionKind::LogicalOp { op, left, right } => {
-                let left_type_opt = self.check_expression(left);
-                let right_type_opt = self.check_expression(right);
-                let op_str = match op { LogicalOperator::And => "&&", LogicalOperator::Or => "||" };
+                let left_type_opt = self.check_expression(left, None);
+                let right_type_opt = self.check_expression(right, None);
+                let op_str = match op {
+                    LogicalOperator::And => "&&",
+                    LogicalOperator::Or => "||",
+                };
 
                 match (left_type_opt, right_type_opt) {
                     (Some(Type::Bool), Some(Type::Bool)) => Some(Type::Bool), // bool && bool -> bool
@@ -860,7 +778,7 @@ impl TypeChecker {
                             self.errors.push(TypeError::InvalidOperation {
                                 op: op_str.to_string(),
                                 type_info: format!("{} and {}", lt, rt), // Report actual types
-                                span
+                                span,
                             });
                         }
                         // If types mismatch but one *was* bool, maybe report better?
@@ -889,7 +807,7 @@ impl TypeChecker {
                             call_site: span,
                         });
                     } else {
-                        let _ = self.check_expression(&args[0]); /* Check arg exists/is valid */
+                        let _ = self.check_expression(&args[0], None); /* Check arg exists/is valid */
                     }
                     // TODO: More specific type check for each print variant if needed
                     Some(Type::Void) // Print calls evaluate to Void
@@ -906,8 +824,8 @@ impl TypeChecker {
                         });
                         return Some(Type::Void); // Still returns Void even on error?
                     }
-                    let vec_type_opt = self.check_expression(&args[0]); // Check first arg (vector)
-                    let elem_type_opt = self.check_expression(&args[1]); // Check second arg (element)
+                    let vec_type_opt = self.check_expression(&args[0], None); // Check first arg (vector)
+                    let elem_type_opt = self.check_expression(&args[1], None); // Check second arg (element)
 
                     // Check if first arg is vector and get element type
                     if let Some(Type::Vector(expected_elem_type)) = vec_type_opt {
@@ -940,7 +858,7 @@ impl TypeChecker {
                     }
                     // len returns int, return type even on error?
                     else {
-                        let target_type = self.check_expression(&args[0]);
+                        let target_type = self.check_expression(&args[0], None);
                         match target_type {
                             // len works on Vector and String
                             Some(Type::Vector(_)) | Some(Type::String) => Some(Type::Int),
@@ -967,7 +885,7 @@ impl TypeChecker {
                     }
                     // Pop returns element type or Void on error? Let's use Void on error.
                     else {
-                        let target_type = self.check_expression(&args[0]);
+                        let target_type = self.check_expression(&args[0], None);
                         match target_type {
                             Some(Type::Vector(elem_type)) => Some(*elem_type), // Pop returns element type
                             Some(other) => {
@@ -998,7 +916,7 @@ impl TypeChecker {
                             }
                             // Check arg types
                             for i in 0..std::cmp::min(args.len(), signature.param_types.len()) {
-                                let Some(arg_type) = self.check_expression(&args[i]) else {
+                                let Some(arg_type) = self.check_expression(&args[i], None) else {
                                     continue;
                                 };
                                 let expected = signature.param_types[i].clone();
@@ -1030,32 +948,26 @@ impl TypeChecker {
                 then_branch,
                 else_branch,
             } => {
-                match self.check_expression(condition) {
-                    Some(Type::Bool) => {} // OK
-                    Some(other) => {
-                        self.errors
-                            .push(TypeError::InvalidConditionType(other, span.clone()));
-                        /* Fallthrough to check branches */
-                    }
-                    None => {} // Error checking condition already recorded
+                // Check condition bool
+                match self.check_expression(condition, Some(Type::Bool)) {
+                    Some(Type::Bool) | None => {} // OK or error already recorded
+                    Some(other) => { self.errors.push(TypeError::InvalidConditionType(other, condition.span.clone())); }
                 }
-                let then_type_opt = self.check_expression(then_branch);
-                let else_type_opt = self.check_expression(else_branch);
+                // Check branches against the overall expected type for the IfExpr (if any)
+                let then_type_opt = self.check_expression(then_branch, expected_type.clone());
+                let else_type_opt = self.check_expression(else_branch, expected_type);
+                // Check types match each other and are not void
                 match (then_type_opt, else_type_opt) {
-                    (Some(tt), Some(et)) => {
-                        if tt == Type::Void || tt != et {
-                            // Branches cannot be void and must match
-                            self.errors.push(TypeError::IfBranchMismatch {
-                                then_type: tt,
-                                else_type: et,
-                                span: span.clone(),
-                            });
-                            None // Type mismatch means expression has no valid type
-                        } else {
-                            Some(tt)
-                        }
+                    (Some(tt), Some(et)) if tt != Type::Void && tt == et => Some(tt), // OK
+                    (Some(tt), Some(et)) => { // Mismatch or Void
+                        self.errors.push(TypeError::IfBranchMismatch {
+                            then_type: tt,
+                            else_type: et,
+                            span: expression.span.clone(),
+                        });
+                        None
                     }
-                    _ => None, // Error occurred in one or both branches
+                    _ => None, // Error in one or both branches
                 }
             }
             ExpressionKind::Block {
@@ -1067,7 +979,7 @@ impl TypeChecker {
                     self.check_statement(stmt);
                 }
                 let block_type = if let Some(final_expr) = final_expression {
-                    self.check_expression(final_expr) // Type is final expression's type (or None if error)
+                    self.check_expression(final_expr, None) // Type is final expression's type (or None if error)
                 } else {
                     Some(Type::Void)
                 }; // No final expr -> Void
@@ -1076,67 +988,94 @@ impl TypeChecker {
             }
             ExpressionKind::VectorLiteral { elements } => {
                 if elements.is_empty() {
-                    // Cannot infer type of empty literal without context
-                    self.errors.push(TypeError::CannotInferVectorType(span));
-                    return None; // Or return special Vector(Unknown)? Let's use None.
-                }
-                // Check all elements, infer type from first, check consistency
-                let first_elem_type_opt = self.check_expression(&elements[0]);
-                let Some(elem_type) = first_elem_type_opt else {
-                    return None;
-                }; // Error in first element
-
-                // Cannot have void elements
-                if elem_type == Type::Void {
-                    self.errors.push(TypeError::InvalidOperation {
-                        op: "vector literal".into(),
-                        type_info: "void elements".into(),
-                        span,
-                    });
-                    return None;
-                }
-
-                for element_expr in elements.iter().skip(1) {
-                    let current_elem_type_opt = self.check_expression(element_expr);
-                    match current_elem_type_opt {
-                        Some(current_type) if current_type == elem_type => { /* OK */ }
-                        Some(mismatch_type) => {
-                            self.errors.push(TypeError::VectorElementTypeMismatch {
-                                expected: elem_type,
-                                found: mismatch_type,
-                                span: element_expr.span.clone(),
-                            });
-                            return None; // Stop on first mismatch
+                    // EMPTY literal []: Use expected type if available
+                    match expected_type {
+                        Some(Type::Vector(expected_elem_type)) => {
+                            // OK: Empty literal matches expected vec<T>
+                            Some(Type::Vector(expected_elem_type))
                         }
-                        None => return None, // Error in subsequent element
+                        _ => {
+                            // Cannot infer type, no context or context not vector
+                            self.errors.push(TypeError::CannotInferVectorType(span));
+                            None
+                        }
                     }
+                } else {
+                    // NON-EMPTY literal: Infer from first, check consistency, maybe check against expected
+                    let first_elem_type_opt = self.check_expression(&elements[0], None); // Check first element without expectation first?
+                    // Or pass down expected *element* type if known?
+                    let expected_elem_type = expected_type.as_ref().and_then(|t| match t {
+                        Type::Vector(et) => Some(*et.clone()), // Deref Box<Type>
+                        _ => None,
+                    });
+
+                    let Some(inferred_elem_type) =
+                        self.check_expression(&elements[0], expected_elem_type.clone())
+                    else {
+                        return None;
+                    };
+                    if inferred_elem_type == Type::Void {
+                        // Cannot infer vector type from void
+                        self.errors
+                            .push(TypeError::CannotInferVectorType(elements[0].span.clone()));
+                        return None;
+                    }
+
+                    // If context provided expected element type, ensure inferred type matches
+                    if let Some(expected_et) = expected_elem_type.clone() {
+                        if inferred_elem_type != expected_et {
+                            self.errors.push(TypeError::VectorElementTypeMismatch {
+                                expected: expected_et,
+                                found: inferred_elem_type,
+                                span: elements[0].span.clone(),
+                            });
+                            return None;
+                        }
+                    }
+
+                    // Check remaining elements match inferred/expected type
+                    for element_expr in elements.iter().skip(1) {
+                        let current_elem_type_opt =
+                            self.check_expression(element_expr, Some(inferred_elem_type.clone())); // Expect consistent type
+                        if current_elem_type_opt != Some(inferred_elem_type.clone()) {
+                            // Error already pushed by check_expression if mismatch against expected,
+                            // or if element check itself failed (returned None)
+                            return None;
+                        }
+                    }
+                    Some(Type::Vector(Box::new(inferred_elem_type))) // Return inferred Vector type
                 }
-                // All elements checked and match the first element's type
-                Some(Type::Vector(Box::new(elem_type)))
             }
             // --- Index Access ---
             ExpressionKind::IndexAccess { target, index } => {
-                let target_type_opt = self.check_expression(target); // Check target first
-                let index_type_opt = self.check_expression(index); // Check index
+                let target_type_opt = self.check_expression(target, None);
+                let index_type_opt = self.check_expression(index, None);
 
-                // Ensure index is Int
+                // Check index is Int
                 if let Some(it) = index_type_opt {
                     if it != Type::Int {
                         self.errors
                             .push(TypeError::IndexNotInteger(it, index.span.clone()));
                     }
-                } // else: error already recorded in index check
+                } // else error already recorded
 
-                // --- Use resolved type of TARGET ---
+                // Check target type and return element type
                 match target_type_opt {
                     Some(Type::Vector(elem_type)) => {
-                        // Target is Vector, result is element type
-                        Some(*elem_type) // Deref Box<Type>
+                        // Indexing vec<T> yields T
+                        Some(*elem_type) // <<< This already handles nested vectors correctly!
+                        // If target_type is vec<vec<int>>, elem_type is vec<int>,
+                        // so this access returns vec<int>. A subsequent index access
+                        // will then see the target as vec<int> and return int.
                     }
-                    // Add String indexing later?
-                    // Some(Type::String) => Some(Type::Char) // Hypothetical
+                    Some(Type::String) => {
+                        // Allow string indexing? Return char type? Need Type::Char.
+                        // self.errors
+                        //     .push(TypeError::NotYetImplemented("String indexing".into(), span));
+                        todo!("String indexing");
+                        None // String indexing not fully supported yet
+                    }
                     Some(other_type) => {
-                        // Target is not a vector (or string)
                         self.errors
                             .push(TypeError::NotAVector(other_type, target.span.clone()));
                         None
@@ -1157,6 +1096,114 @@ impl TypeChecker {
 
         maybe_type // Return the determined type (or None if error occurred)
     } // End check_expression
+
+    // New helper to check expressions used as L-values (targets of assignment)
+    // Returns the type of the target if valid, pushes errors otherwise.
+    fn check_lvalue_expression(&mut self, target: &Expression) -> Option<Type> {
+        match &target.kind {
+            ExpressionKind::Variable(name) => {
+                let info_opt = self.symbol_table.lookup_variable(name);
+                match info_opt {
+                    Some(info) => {
+                        if !info.is_mutable {
+                            self.errors.push(TypeError::AssignmentToImmutable(
+                                name.clone(),
+                                target.span.clone(),
+                            ));
+                            None // Invalid l-value if immutable
+                        } else {
+                            Some(info.ty.clone())
+                        } // Valid l-value, return its type
+                    }
+                    None => {
+                        self.errors.push(TypeError::UndefinedVariable(
+                            name.clone(),
+                            target.span.clone(),
+                        ));
+                        None
+                    }
+                }
+            }
+            ExpressionKind::IndexAccess {
+                target: vec_expr,
+                index,
+            } => {
+                // Check index is int
+                let index_type_opt = self.check_expression(index, None);
+                if index_type_opt != Some(Type::Int) { 
+                    self.errors
+                        .push(TypeError::IndexNotInteger(index_type_opt.unwrap_or(Type::Void), index.span.clone()));
+                }
+
+                // Check target is mutable vector
+                let vec_type_opt = self.check_expression(vec_expr, None); // Check the vec expr
+                match vec_type_opt {
+                    Some(Type::Vector(elem_type)) => {
+                        // Check if vec_expr itself points to a mutable variable
+                        if let ExpressionKind::Variable(var_name) = &vec_expr.kind {
+                            if let Some(info) = self.symbol_table.lookup_variable(var_name) {
+                                if !info.is_mutable {
+                                    self.errors.push(TypeError::AssignmentToImmutable(
+                                        format!("{}[...]", var_name),
+                                        target.span.clone(),
+                                    ));
+                                    return None; // Cannot assign to element if vec var immutable
+                                }
+                            } // Else: Undefined var already caught
+                            // todo add strings
+                        } else {
+                            // Assigning to index of non-variable vec expr? Disallow for now.
+                            self.errors
+                                .push(TypeError::InvalidAssignmentTarget(target.to_code(), target.span.clone()));
+                            return None;
+                        }
+                        // Valid index assign l-value, type is element type
+                        Some(*elem_type)
+                    }
+                    Some(other) => {
+                        self.errors.push(TypeError::AssignIndexTargetNotVector(
+                            other,
+                            vec_expr.span.clone(),
+                        ));
+                        None
+                    }
+                    None => None, // Error checking vector expr
+                }
+            }
+            // Invalid L-value kind
+            _ => {
+                self.errors
+                    .push(TypeError::InvalidAssignmentTarget(target.to_code(), target.span.clone()));
+                None
+            }
+        }
+    }
+
+    // Helper to resolve TypeNode - needs self now to push errors
+    fn resolve_type_node(&mut self, node: &TypeNode) -> Option<Type> {
+        match &node.kind {
+            TypeNodeKind::Simple(name) => match name.as_str() {
+                "int" => Some(Type::Int),
+                "float" => Some(Type::Float),
+                "bool" => Some(Type::Bool),
+                "string" => Some(Type::String), // Handle string type name
+                "void" => Some(Type::Void),
+                // Add more types as needed
+                _ => {
+                    self.errors.push(TypeError::UnknownTypeName(
+                        name.clone(),
+                        node.span.start.clone(),
+                    ));
+                    None
+                }
+            },
+            TypeNodeKind::Vector(element_node) => {
+                // Recursively resolve element type
+                self.resolve_type_node(element_node)
+                    .map(|t| Type::Vector(Box::new(t)))
+            }
+        }
+    }
 
     // Helper to check blocks used inside statements like IfStmt, WhileStmt, ForStmt
     // These blocks don't produce a value for the statement itself.

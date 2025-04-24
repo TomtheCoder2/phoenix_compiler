@@ -14,7 +14,7 @@ use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
@@ -328,7 +328,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 Ok(_) => println!("LLVM IR written to: {}", ir_file_path.display()),
                 Err(e) => eprintln!("Error writing LLVM IR to file: {}", e),
             }
-            
+
             return Err(CodeGenError::LlvmError(
                 "Main function verification failed before optimization".to_string(),
                 Span::default(), // Placeholder, should be the actual span of the main function
@@ -526,7 +526,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 let lhs_type = left.get_type().unwrap_or(Type::Void); // Get type from AST node
                 let rhs_type = right.get_type().unwrap_or(Type::Void);
-                
+
                 // Basic type checking (Replace with proper type checker later)
                 match (lhs_type, rhs_type, op) {
                     (Type::Int, Type::Int, _) => {
@@ -536,14 +536,16 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             BinaryOperator::Add => self.builder.build_int_add(l, r, "addtmp"),
                             BinaryOperator::Subtract => self.builder.build_int_sub(l, r, "subtmp"),
                             BinaryOperator::Multiply => self.builder.build_int_mul(l, r, "multmp"),
-                            BinaryOperator::Divide => self.builder.build_int_signed_div(l, r, "sdivtmp"), // Signed division
+                            BinaryOperator::Divide => {
+                                self.builder.build_int_signed_div(l, r, "sdivtmp")
+                            } // Signed division
                         } {
                             Ok(val) => val,
                             Err(e) => {
-                                return Err(CodeGenError::LlvmError(format!(
-                                    "LLVM error during integer operation: {}",
-                                    e
-                                ), span))
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during integer operation: {}", e),
+                                    span,
+                                ))
                             }
                         };
                         Ok(result.into())
@@ -553,27 +555,39 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         let r = rhs.into_float_value();
                         let result = match match op {
                             BinaryOperator::Add => self.builder.build_float_add(l, r, "faddtmp"),
-                            BinaryOperator::Subtract => self.builder.build_float_sub(l, r, "fsubtmp"),
-                            BinaryOperator::Multiply => self.builder.build_float_mul(l, r, "fmultmp"),
+                            BinaryOperator::Subtract => {
+                                self.builder.build_float_sub(l, r, "fsubtmp")
+                            }
+                            BinaryOperator::Multiply => {
+                                self.builder.build_float_mul(l, r, "fmultmp")
+                            }
                             BinaryOperator::Divide => self.builder.build_float_div(l, r, "fdivtmp"),
                         } {
                             Ok(val) => val,
                             Err(e) => {
-                                return Err(CodeGenError::LlvmError(format!(
-                                    "LLVM error during float operation: {}",
-                                    e
-                                ), span))
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during float operation: {}", e),
+                                    span,
+                                ))
                             }
                         };
                         Ok(result.into())
                     }
                     (Type::String, Type::String, BinaryOperator::Add) => {
                         let str_concat_func = self.get_or_declare_str_concat();
-                        let result_handle = match  self.builder.build_call(str_concat_func, &[lhs.into(), rhs.into()], "concat_str"){
-                            Ok(call) => call.try_as_basic_value().left().ok_or(CodeGenError::LlvmError(
-                                "Failed to get string handle from call".to_string(),
-                                span,
-                            ))?.into_pointer_value(), // i8* handle
+                        let result_handle = match self.builder.build_call(
+                            str_concat_func,
+                            &[lhs.into(), rhs.into()],
+                            "concat_str",
+                        ) {
+                            Ok(call) => call
+                                .try_as_basic_value()
+                                .left()
+                                .ok_or(CodeGenError::LlvmError(
+                                    "Failed to get string handle from call".to_string(),
+                                    span,
+                                ))?
+                                .into_pointer_value(), // i8* handle
                             Err(e) => {
                                 return Err(CodeGenError::LlvmError(
                                     format!("Call to _phoenix_str_concat failed: {}", e),
@@ -584,8 +598,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         Ok(result_handle.into()) // Result is new string handle (i8*)
                     }
                     _ => Err(CodeGenError::InvalidBinaryOperation(
-                        format!("Type mismatch or unsupported types for operator {} (lhs: {}, rhs: {})", op, lhs.get_type(), rhs.get_type())
-                        , span))
+                        format!(
+                            "Type mismatch or unsupported types for operator {} (lhs: {}, rhs: {})",
+                            op,
+                            lhs.get_type(),
+                            rhs.get_type()
+                        ),
+                        span,
+                    )),
                 }
             }
 
@@ -823,7 +843,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             }
                         };
                         phi.add_incoming(&[
-                            (&false_val, cond_bb),   // If branch from cond was false, result is false
+                            (&false_val, cond_bb),     // If branch from cond was false, result is false
                             (&rhs_bool, rhs_final_bb), // If branch from rhs_bb, result is rhs_bool
                         ]);
 
@@ -906,7 +926,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             }
                         };
                         phi.add_incoming(&[
-                            (&true_val, cond_bb),    // If branch from cond was true, result is true
+                            (&true_val, cond_bb),      // If branch from cond was true, result is true
                             (&rhs_bool, rhs_final_bb), // If branch from rhs_bb, result is rhs_bool
                         ]);
 
@@ -1151,7 +1171,10 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         Some(Type::Vector(et)) => *et,
                         _ => {
                             return Err(CodeGenError::InvalidType(
-                                format!("Expected vector type, found {}", vec_resolved_type.unwrap_or(Type::Void)),
+                                format!(
+                                    "Expected vector type, found {}",
+                                    vec_resolved_type.unwrap_or(Type::Void)
+                                ),
                                 span,
                             ))
                         }
@@ -1572,41 +1595,24 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
             // --- Vector Literal ---
             ExpressionKind::VectorLiteral { elements } => {
-                // 1. Infer element type (Type Checker should have ensured consistency)
-                // We need the actual type here for size calculation. Re-check first element? Risky.
-                // Assume type checker worked and passed info somehow, or re-infer.
-                if elements.is_empty() {
-                    // How to handle empty vector literal? Need type context.
-                    return Err(CodeGenError::InvalidAstNode(
-                        "Cannot codegen empty vector literal without type context".to_string(),
-                        span,
-                    ));
-                }
-                // Infer from first element - relies on type checker having run correctly
-                let first_elem_val = self.compile_expression(&elements[0])?;
-                let elem_llvm_type = first_elem_val.get_type();
-                let elem_toy_type =
-                    match elem_llvm_type {
-                        // Basic reverse map
-                        BasicTypeEnum::FloatType(_) => Type::Float,
-                        BasicTypeEnum::IntType(it) if it.get_bit_width() == 1 => Type::Bool,
-                        BasicTypeEnum::IntType(_) => Type::Int,
-                        BasicTypeEnum::PointerType(_) => Type::String, // Assuming string ptr
-                        _ => return Err(CodeGenError::InvalidType(
-                            "Unsupported vector element type. todo: make ast annotate the types"
-                                .to_string(),
-                            span,
-                        )),
-                    };
-                let elem_size = self.get_sizeof(&elem_toy_type).unwrap_or(0);
-                if elem_size == 0 {
-                    return Err(CodeGenError::InvalidType(
-                        "Vector elements cannot be void".to_string(),
-                        span,
-                    ));
-                }
+                // --- Determine Element Type (Using resolved type from AST) ---
+                let vector_type = expr.get_type().unwrap_or(Type::Void); // Get vec<T> type
+                let elem_toy_type = match vector_type {
+                    Type::Vector(et) => *et,
+                    _ => {
+                        return Err(CodeGenError::InvalidType(
+                            "Vector literal node missing Vector type".into(),
+                            expr.span.clone(),
+                        ))
+                    }
+                };
+                if elem_toy_type == Type::Void { /* Error */ }
+                // Get size of ELEMENT for vec_new, but size of HANDLE if elements are vectors
+                // No, vec_new takes element size. If elem is vec<int>, size is pointer size.
+                let elem_size = self.get_sizeof(&elem_toy_type).unwrap();
+                let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap(); // Basic type of element (e.g., i8*, i64)
 
-                // 2. Call runtime vec_new(elem_size, capacity)
+                // --- Call vec_new ---
                 let vec_new_func = self.get_or_declare_vec_new();
                 let capacity = self
                     .context
@@ -1628,152 +1634,164 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 }
                 .try_as_basic_value()
                 .left()
-                .ok_or_else(|| {
-                    CodeGenError::LlvmError("vec_new call failed".to_string(), span.clone())
-                })?
-                .into_pointer_value(); // Should return i8* handle
+                .ok_or(CodeGenError::LlvmError(
+                    "vec_new call failed".to_string(),
+                    expr.span.clone(),
+                ))?
+                .into_pointer_value(); // i8* handle
 
-                // 3. Compile element expressions and store them
-                let vec_get_ptr_func = self.get_or_declare_vec_get_ptr();
-                for (i, elem_expr) in elements.iter().enumerate() {
-                    let elem_val = self.compile_expression(elem_expr)?;
-                    // Check type match (should be guaranteed by type checker)
-                    if elem_val.get_type() != elem_llvm_type { /* Internal Compiler Error */ }
+                // --- Populate Vector using vec_push ---
+                let vec_push_func = self.get_or_declare_vec_push();
+                for elem_expr in elements.iter() {
+                    let elem_val = self.compile_expression(elem_expr)?; // Compile element (might be i8* handle for inner vec)
+                                                                        // Check type match (redundant if TC works)
+                    if elem_val.get_type() != elem_llvm_type { /* Internal Error */ }
 
-                    // Get pointer to element slot i: ptr = vec_get_ptr(handle, i)
-                    let index_val = self.context.i64_type().const_int(i as u64, false);
-                    let elem_ptr_i8 = match self.builder.build_call(
-                        vec_get_ptr_func,
-                        &[vec_handle.into(), index_val.into()],
-                        "elem_ptr_i8",
-                    ) {
-                        Ok(val) => val,
-                        Err(e) => {
-                            return Err(CodeGenError::LlvmError(
-                                format!("LLVM error during vec_get_ptr call: {}", e),
-                                span.clone(),
-                            ))
-                        }
-                    }
-                    .try_as_basic_value()
-                    .left()
-                    .ok_or(CodeGenError::LlvmError(
-                        "vec_get_ptr call failed".to_string(),
-                        span.clone(),
-                    ))?
-                    .into_pointer_value();
-
-                    // Cast i8* element slot pointer to actual element type pointer
-                    let elem_ptr_typed = match self.builder.build_pointer_cast(
-                        elem_ptr_i8,
-                        self.context.ptr_type(AddressSpace::default()), // e.g., i64*, float*
-                        "elem_ptr_typed",
+                    // Allocate temp space, store, cast pointer, call vec_push
+                    let temp_alloca =
+                        match self.builder.build_alloca(elem_llvm_type, "push_val_alloca") {
+                            Ok(val) => val,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("LLVM error during alloca: {}", e),
+                                    span,
+                                ))
+                            }
+                        };
+                    self.builder.build_store(temp_alloca, elem_val);
+                    let value_ptr_i8 = match self.builder.build_pointer_cast(
+                        temp_alloca,
+                        self.context.ptr_type(AddressSpace::default()),
+                        "push_val_ptr",
                     ) {
                         Ok(val) => val,
                         Err(e) => {
                             return Err(CodeGenError::LlvmError(
                                 format!("LLVM error during pointer cast: {}", e),
-                                span.clone(),
+                                span,
                             ))
                         }
                     };
-
-                    // Store the compiled element value into the slot
-                    match self.builder.build_store(elem_ptr_typed, elem_val) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Err(CodeGenError::LlvmError(
-                                format!("LLVM error during store: {}", e),
-                                span.clone(),
-                            ))
-                        }
-                    }
+                    self.builder.build_call(
+                        vec_push_func,
+                        &[vec_handle.into(), value_ptr_i8.into()],
+                        "",
+                    );
                 }
-
-                // 4. Vector literal expression evaluates to the handle (i8*)
-                Ok(vec_handle.into())
+                Ok(vec_handle.into()) // Return outer vector handle
             }
 
             // --- Index Access ---
             ExpressionKind::IndexAccess { target, index } => {
-                // 1. Compile target (expect i8* vector handle) and index (expect i64)
-                let target_handle = self.compile_expression(target)?;
-                let index_val = self.compile_expression(index)?;
-
-                // Type check results (basic)
-                let vec_handle_ptr = match target_handle {
-                    BasicValueEnum::PointerValue(pv) => pv, // Assume it's the i8* handle
+                // Compile Target and Index first
+                let target_val = self.compile_expression(target)?; // Target value (e.g., i8* handle)
+                let index_val = self.compile_expression(index)?; // Index value (e.g., i64)
+                let target_handle_ptr = match target_val {
+                    BasicValueEnum::PointerValue(pv)
+                        if pv.get_type()
+                            == self.context.i8_type().ptr_type(AddressSpace::default()) =>
+                    {
+                        pv
+                    }
                     _ => {
                         return Err(CodeGenError::InvalidType(
-                            "Target of index must be a vector".to_string(),
+                            format!(
+                                "Expected vector handle (i8*), found {}",
+                                target_val.get_type()
+                            ),
                             span,
                         ))
                     }
                 };
                 let index_i64 = match index_val {
-                    BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() == 64 => iv,
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 64 {
+                            iv
+                        } else {
+                            return Err(CodeGenError::InvalidType(
+                                format!("Index must be i64, found {}", index_val.get_type()),
+                                span,
+                            ));
+                        }
+                    }
                     _ => {
                         return Err(CodeGenError::InvalidType(
-                            "Index must be an integer".to_string(),
+                            format!(
+                                "Expected index to be an integer, found {}",
+                                index_val.get_type()
+                            ),
                             span,
                         ))
                     }
                 };
 
-                // 2. Determine Element Type (Need this from type checker!)
-                // We lost the element type info here. We need the type checker pass
-                // to potentially annotate the AST IndexAccess node with the vector's element type.
-                let elem_toy_type =
-                    expr.resolved_type.borrow().clone().expect(
-                        "IndexAccess expression should have resolved type from type checker",
-                    );
+                // --- Get Element Type from TARGET's resolved type ---
+                let target_resolved_type = target.get_type();
+                let elem_toy_type = match target_resolved_type {
+                    Some(Type::Vector(et)) => *et,
+                    // Add String indexing later
+                    // Some(Type::String) => Type::Char, // Hypothetical
+                    _ => {
+                        return Err(CodeGenError::InvalidType(
+                            format!(
+                                "Expected vector type, found {}",
+                                target_resolved_type.unwrap_or(Type::Void)
+                            ),
+                            span,
+                        ))
+                    }
+                };
                 let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
 
-                // 3. Call runtime vec_get_ptr(handle, index) -> i8*
+                // --- Call vec_get_ptr ---
                 let vec_get_ptr_func = self.get_or_declare_vec_get_ptr();
                 let elem_ptr_i8 = match self.builder.build_call(
                     vec_get_ptr_func,
-                    &[vec_handle_ptr.into(), index_i64.into()],
+                    &[target_handle_ptr.into(), index_i64.into()],
                     "elem_ptr_i8",
                 ) {
-                    Ok(val) => val,
+                    Ok(call) => call
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or(CodeGenError::LlvmError(
+                            "Failed to get element pointer from vector".to_string(),
+                            span.clone(),
+                        ))?
+                        .into_pointer_value(), // i8* handle
                     Err(e) => {
                         return Err(CodeGenError::LlvmError(
                             format!("LLVM error during vec_get_ptr call: {}", e),
                             span,
                         ))
                     }
-                }
-                .try_as_basic_value()
-                .left()
-                .ok_or(CodeGenError::LlvmError(
-                    "vec_get_ptr call failed".to_string(),
-                    span.clone(),
-                ))?
-                .into_pointer_value();
-
-                // 4. Cast i8* element slot pointer to actual element type pointer
+                };
+                // --- Cast and Load ---
                 let elem_ptr_typed = match self.builder.build_pointer_cast(
                     elem_ptr_i8,
-                    elem_llvm_type.ptr_type(AddressSpace::default()),
+                    elem_llvm_type.ptr_type(AddressSpace::default()), // Pointer to element type (e.g., i64*, float*, i8**)
                     "elem_ptr_typed",
-                ) {
+                ){
                     Ok(val) => val,
                     Err(e) => {
                         return Err(CodeGenError::LlvmError(
                             format!("LLVM error during pointer cast: {}", e),
-                            span.clone(),
+                            span,
                         ))
                     }
                 };
+                let loaded_val = match 
+                    self.builder
+                        .build_load(elem_llvm_type, elem_ptr_typed, "load_idx"){
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("LLVM error during load: {}", e),
+                            span,
+                        ))
+                    }
+                }; // Load value (e.g., i64, float, i8*)
 
-                // 5. Load the value from the element pointer
-                let loaded_val = self
-                    .builder
-                    .build_load(elem_llvm_type, elem_ptr_typed, "load_idx")
-                    .map_err(|e| CodeGenError::LlvmError(format!("Load failed: {}", e), span))?;
-
-                Ok(loaded_val) // Return the loaded element value
+                Ok(loaded_val) // Return the loaded element value (which could be another handle)
             }
         } // End match expr
     }
@@ -2027,14 +2045,18 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     }
 
     // Get size of a phoenix Type in bytes (basic implementation)
+    // Get size of a ToyLang Type in bytes
     fn get_sizeof(&self, ty: &Type) -> Option<u64> {
-        // This needs target machine data layout ideally! Hardcoding for now. Assumes 64-bit.
+        // Needs target machine data layout! Hardcoding 64-bit pointer size.
+        // todo: Use target machine data layout for pointer size
+        let pointer_size = 8;
         match ty {
-            Type::Int | Type::Float => Some(8), // i64, f64
-            Type::Bool => Some(1),              // i1 / bool
-            Type::String => Some(8),            // i8* pointer size
-            Type::Vector(_) => Some(8),         // Handle (pointer) size
-            Type::Void => Some(0),              // Or None? Let's use 0.
+            Type::Int | Type::Float => Some(8),
+            Type::Bool => Some(1),
+            // String and Vector are represented by handles (pointers)
+            Type::String => Some(pointer_size),
+            Type::Vector(_) => Some(pointer_size), // <<< Size of the handle/pointer
+            Type::Void => Some(0),
         }
     }
 
@@ -2564,9 +2586,11 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             return Err(CodeGenError::InvalidType(
                 format!(
                     "Internal Error: RHS value type {} does not match variable type {} for '{}'",
-                    compiled_value.get_type(), expected_llvm_type, name
+                    compiled_value.get_type(),
+                    expected_llvm_type,
+                    name
                 ),
-                span
+                span,
             ));
         }
         // --- End Type Check ---

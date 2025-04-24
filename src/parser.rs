@@ -115,8 +115,8 @@ fn token_precedence(token: &TokenKind) -> Precedence {
         | TokenKind::MinusAssign
         | TokenKind::StarAssign
         | TokenKind::SlashAssign => Precedence::Assign,
-        TokenKind::Or => Precedence::Or,   
-        TokenKind::And => Precedence::And, 
+        TokenKind::Or => Precedence::Or,
+        TokenKind::And => Precedence::And,
         TokenKind::Equal | TokenKind::NotEqual => Precedence::Equals,
         TokenKind::LessThan
         | TokenKind::GreaterThan

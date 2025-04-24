@@ -47,7 +47,7 @@ pub extern "C" fn _phoenix_vec_new(elem_size: i64, capacity: i64) -> *mut libc::
     // Allocate header struct on the heap using Box, then leak it to get a stable pointer
     let header = Box::new(PhoenixVec {
         capacity,
-        length: capacity, // We assume that the vector is initialized with the given capacity // todo maybe specify an argument initial length
+        length: 0, // We assume that the vector is initialized with the given capacity // todo maybe specify an argument initial length
         elem_size,
         data: data_ptr,
     });

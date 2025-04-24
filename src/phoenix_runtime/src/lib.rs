@@ -1,16 +1,14 @@
 // Add imports for runtime
-use std::ffi::CStr;
-use std::os::raw::c_char;
-use std::slice;
 use crate::vector::PhoenixVec;
+use std::slice;
 
-pub mod vector;
 pub mod string;
+pub mod vector;
 // For pointer type
 
 #[no_mangle]
 pub extern "C" fn print_f64_wrapper(value: f64) {
-    print!("{:.6}", value);
+    print!("{}", value);
 }
 
 #[no_mangle]
