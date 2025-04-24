@@ -105,6 +105,15 @@ fn main() {
         }
     }
 
+    // write the ast to file if verbose, write again because now it has type information
+    if args.verbose {
+        let ast_file_path = output_path.with_extension("ast");
+        match fs::write(&ast_file_path, format!("{:#?}", program)) {
+            Ok(_) => println!("AST written to: {} (with type information)", ast_file_path.display()),
+            Err(e) => eprintln!("Error writing AST to file: {}", e),
+        }
+    }
+
     // Generate LLVM IR
     let context = Context::create();
     let module = context.create_module("toy_module_obj");

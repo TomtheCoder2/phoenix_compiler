@@ -584,7 +584,11 @@ impl TypeChecker {
                 // Check if value type matches annotation
                 // TODO: Handle vector literal type inference/checking against annotation
                 if value_type != *ann_ty
-                    && !self.check_vector_literal_assignment(&value_type, &ann_ty, value.span.clone())
+                    && !self.check_vector_literal_assignment(
+                        &value_type,
+                        &ann_ty,
+                        value.span.clone(),
+                    )
                 {
                     self.errors.push(TypeError::TypeMismatch {
                         expected: ann_ty.clone(),
@@ -658,6 +662,7 @@ impl TypeChecker {
                 // Check target first to know expected type for value
                 let target_type_opt = self.check_lvalue_expression(target); // Check target validity/type
                 let Some(target_type) = target_type_opt else {
+                    let _ = self.check_expression(value, None); // Still check RHS for errors
                     return None;
                 };
 
@@ -951,7 +956,12 @@ impl TypeChecker {
                 // Check condition bool
                 match self.check_expression(condition, Some(Type::Bool)) {
                     Some(Type::Bool) | None => {} // OK or error already recorded
-                    Some(other) => { self.errors.push(TypeError::InvalidConditionType(other, condition.span.clone())); }
+                    Some(other) => {
+                        self.errors.push(TypeError::InvalidConditionType(
+                            other,
+                            condition.span.clone(),
+                        ));
+                    }
                 }
                 // Check branches against the overall expected type for the IfExpr (if any)
                 let then_type_opt = self.check_expression(then_branch, expected_type.clone());
@@ -959,7 +969,8 @@ impl TypeChecker {
                 // Check types match each other and are not void
                 match (then_type_opt, else_type_opt) {
                     (Some(tt), Some(et)) if tt != Type::Void && tt == et => Some(tt), // OK
-                    (Some(tt), Some(et)) => { // Mismatch or Void
+                    (Some(tt), Some(et)) => {
+                        // Mismatch or Void
                         self.errors.push(TypeError::IfBranchMismatch {
                             then_type: tt,
                             else_type: et,
@@ -1003,7 +1014,7 @@ impl TypeChecker {
                 } else {
                     // NON-EMPTY literal: Infer from first, check consistency, maybe check against expected
                     let first_elem_type_opt = self.check_expression(&elements[0], None); // Check first element without expectation first?
-                    // Or pass down expected *element* type if known?
+                                                                                         // Or pass down expected *element* type if known?
                     let expected_elem_type = expected_type.as_ref().and_then(|t| match t {
                         Type::Vector(et) => Some(*et.clone()), // Deref Box<Type>
                         _ => None,
@@ -1064,9 +1075,9 @@ impl TypeChecker {
                     Some(Type::Vector(elem_type)) => {
                         // Indexing vec<T> yields T
                         Some(*elem_type) // <<< This already handles nested vectors correctly!
-                        // If target_type is vec<vec<int>>, elem_type is vec<int>,
-                        // so this access returns vec<int>. A subsequent index access
-                        // will then see the target as vec<int> and return int.
+                                         // If target_type is vec<vec<int>>, elem_type is vec<int>,
+                                         // so this access returns vec<int>. A subsequent index access
+                                         // will then see the target as vec<int> and return int.
                     }
                     Some(Type::String) => {
                         // Allow string indexing? Return char type? Need Type::Char.
@@ -1124,58 +1135,87 @@ impl TypeChecker {
                     }
                 }
             }
+            // Case 2: Index Access - e.g., vec[idx] or matrix[i][j]
             ExpressionKind::IndexAccess {
-                target: vec_expr,
+                target: inner_target,
                 index,
             } => {
-                // Check index is int
-                let index_type_opt = self.check_expression(index, None);
-                if index_type_opt != Some(Type::Int) { 
-                    self.errors
-                        .push(TypeError::IndexNotInteger(index_type_opt.unwrap_or(Type::Void), index.span.clone()));
+                // Index must be integer
+                match self.check_expression(index, Some(Type::Int)) {
+                    Some(Type::Int) => {} // OK
+                    Some(other) => {
+                        self.errors
+                            .push(TypeError::IndexNotInteger(other, index.span.clone()));
+                        return None;
+                    }
+                    None => return None, // Error checking index
                 }
 
-                // Check target is mutable vector
-                let vec_type_opt = self.check_expression(vec_expr, None); // Check the vec expr
-                match vec_type_opt {
-                    Some(Type::Vector(elem_type)) => {
-                        // Check if vec_expr itself points to a mutable variable
-                        if let ExpressionKind::Variable(var_name) = &vec_expr.kind {
-                            if let Some(info) = self.symbol_table.lookup_variable(var_name) {
-                                if !info.is_mutable {
-                                    self.errors.push(TypeError::AssignmentToImmutable(
-                                        format!("{}[...]", var_name),
-                                        target.span.clone(),
-                                    ));
-                                    return None; // Cannot assign to element if vec var immutable
-                                }
-                            } // Else: Undefined var already caught
-                            // todo add strings
-                        } else {
-                            // Assigning to index of non-variable vec expr? Disallow for now.
-                            self.errors
-                                .push(TypeError::InvalidAssignmentTarget(target.to_code(), target.span.clone()));
+                // --- Check the INNER target ---
+                // The inner target (e.g., 'vec' in vec[idx], or 'matrix[i]' in matrix[i][j])
+                // must evaluate to a vector, AND must itself be mutable *at this level*
+                // (e.g., if matrix is `let`, matrix[i][j]=... fails).
+                // However, checking the mutability of the *result* of inner_target isn't quite right.
+                // We need to check if the base variable (e.g., 'matrix') is mutable.
+
+                // Let's recursively check the *inner target* as an L-Value first? No, that's for target[i][j] = ...
+                // For target[i][j] = value, we need the *type* of target[i] and mutability of target.
+
+                // Check type of inner_target (e.g. matrix[i])
+                let Some(inner_target_type) = self.check_expression(inner_target, None) else {
+                    return None;
+                };
+
+                match inner_target_type {
+                    Type::Vector(elem_type) => {
+                        // The inner target (e.g. matrix[i]) resolved to a vector.
+                        // Now, check if the base of this access (e.g., "matrix") is mutable.
+                        // This requires traversing down the L-value chain.
+                        if !self.is_lvalue_base_mutable(inner_target) {
+                            self.errors.push(TypeError::AssignmentToImmutable(
+                                "vector element via immutable base".to_string(), // Improve msg
+                                inner_target.span.clone(),
+                            ));
                             return None;
                         }
-                        // Valid index assign l-value, type is element type
+                        // The L-value `target[i][j]` has the type of the element.
                         Some(*elem_type)
                     }
-                    Some(other) => {
+                    // Add String indexing assignment check later?
+                    _ => {
                         self.errors.push(TypeError::AssignIndexTargetNotVector(
-                            other,
-                            vec_expr.span.clone(),
+                            inner_target_type,
+                            inner_target.span.clone(),
                         ));
                         None
                     }
-                    None => None, // Error checking vector expr
                 }
-            }
+            } // End IndexAccess case
             // Invalid L-value kind
             _ => {
-                self.errors
-                    .push(TypeError::InvalidAssignmentTarget(target.to_code(), target.span.clone()));
+                self.errors.push(TypeError::InvalidAssignmentTarget(
+                    target.to_code(),
+                    target.span.clone(),
+                ));
                 None
             }
+        }
+    }
+
+    // Helper to recursively check if the base variable of an L-Value expression is mutable
+    fn is_lvalue_base_mutable(&self, expr: &Expression) -> bool {
+        match &expr.kind {
+            ExpressionKind::Variable(name) => {
+                // Base case: check the variable itself
+                self.symbol_table.lookup_variable(name).map_or(false, |info| info.is_mutable)
+                // If lookup fails, UndefinedVariable error handled elsewhere, return false here
+            }
+            ExpressionKind::IndexAccess { target, .. } => {
+                // Recursive case: check the target of the index access
+                self.is_lvalue_base_mutable(target)
+            }
+            // Add cases for field access later (e.g., struct.field) -> return self.is_lvalue_base_mutable(struct_expr)
+            _ => false, // Other expression kinds are not mutable L-values bases
         }
     }
 

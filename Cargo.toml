@@ -19,6 +19,7 @@ path = "src/bin/main.rs"
 inkwell = { version = "0.5.0", features = ["llvm15-0"] } # Adjust LLVM version as needed
 # libc = "0.2" # Add if you choose the libc::printf wrapper later
 clap = { version = "4.4", features = ["derive"] }
+indexmap = "2.9.0"
 
 [workspace]
 members = [".", "src/phoenix_runtime"]
