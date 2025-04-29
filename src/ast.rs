@@ -366,6 +366,11 @@ pub enum ExpressionKind {
         struct_name: String,
         fields: Vec<FieldInit>, // Holds parsed field initializers
     },
+    // Added: target.field
+    MemberAccess {
+        target: Box<Expression>, // The expression evaluating to the struct instance
+        field: String,           // The name of the field being accessed
+    },
 }
 
 // Separate enums for operator types

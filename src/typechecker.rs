@@ -94,6 +94,8 @@ pub enum TypeError {
         new_loc: Span,
         prev_loc: Span,
     },
+    NotAStruct(Type, Span),             // Tried member access on non-struct
+    UnknownField(String, String, Span), // Struct S doesn't have field F
 }
 // src/typechecker.rs
 impl fmt::Display for TypeError {
@@ -294,6 +296,16 @@ impl fmt::Display for TypeError {
                     f,
                     "{} Struct '{}' redefined in this scope, first definition at {}",
                     new_loc, name, prev_loc
+                )
+            }
+            TypeError::NotAStruct(ty, span) => {
+                write!(f, "{} Not a struct type: {}", span, ty)
+            }
+            TypeError::UnknownField(name, field_name, span) => {
+                write!(
+                    f,
+                    "{} Unknown field '{}' in struct '{}'",
+                    span, field_name, name
                 )
             }
         }
@@ -806,6 +818,31 @@ impl TypeChecker {
                 }
                 Some(value_type)
             }
+            ExpressionKind::MemberAccess { target, field } => {
+                // Check the target expression first
+                let Some(target_type) = self.check_expression(target, None) else { return None; };
+
+                // Check if target is a struct
+                let Type::Struct { name: struct_name } = target_type else {
+                    self.errors.push(TypeError::NotAStruct(target_type, target.span.clone()));
+                    return None;
+                };
+
+                // Look up struct definition
+                let Some(struct_def) = self.symbol_table.lookup_struct(&struct_name) else {
+                    self.errors.push(TypeError::UnknownStruct(struct_name.to_string(), target.span.clone()));
+                    return None;
+                };
+
+                // Look up field type in definition
+                match struct_def.field_map.get(field) {
+                    Some((_idx, field_type)) => Some(field_type.clone()), // Result is the field's type
+                    None => {
+                        self.errors.push(TypeError::UnknownField(struct_name.to_string(), field.clone(), span));
+                        None
+                    }
+                }
+            } // End MemberAccess case
             ExpressionKind::BinaryOp { op, left, right } => {
                 let left_type_opt = self.check_expression(left, None);
                 let right_type_opt = self.check_expression(right, None);
@@ -1315,6 +1352,7 @@ impl TypeChecker {
     // New helper to check expressions used as L-values (targets of assignment)
     // Returns the type of the target if valid, pushes errors otherwise.
     fn check_lvalue_expression(&mut self, target: &Expression) -> Option<Type> {
+        let span = target.span.clone();
         match &target.kind {
             ExpressionKind::Variable(name) => {
                 let info_opt = self.symbol_table.lookup_variable(name);
@@ -1395,6 +1433,57 @@ impl TypeChecker {
                     }
                 }
             } // End IndexAccess case
+            // --- Member Access L-Value ---
+            ExpressionKind::MemberAccess {
+                target: struct_expr,
+                field,
+            } => {
+                // Check the inner target expression (e.g., 'my_point' in my_point.x)
+                let Some(struct_type) = self.check_expression(struct_expr, None) else {
+                    return None;
+                };
+
+                // Check if it's actually a struct type
+                let Type::Struct { name: struct_name } = struct_type else {
+                    self.errors
+                        .push(TypeError::NotAStruct(struct_type, struct_expr.span.clone()));
+                    return None;
+                };
+
+                // Look up the struct definition
+                let Some(struct_def) = self.symbol_table.lookup_struct(&struct_name) else {
+                    // Should be impossible if struct type resolved correctly, but check defensively
+                    self.errors.push(TypeError::UnknownStruct(
+                        struct_name.to_string(),
+                        struct_expr.span.clone(),
+                    )); // Use inner span
+                    return None;
+                };
+
+                // Look up the field in the definition
+                match struct_def.field_map.get(field) {
+                    Some((_idx, field_type)) => {
+                        // Field exists. Now check if the base struct variable is mutable.
+                        if !self.is_lvalue_base_mutable(struct_expr) {
+                            self.errors.push(TypeError::AssignmentToImmutable(
+                                format!("{}.{}", "struct", field), // Improve target name
+                                span,
+                            ));
+                            return None;
+                        }
+                        // Valid L-value, type is the field's type
+                        Some(field_type.clone())
+                    }
+                    None => {
+                        self.errors.push(TypeError::UnknownField(
+                            struct_name.to_string(),
+                            field.clone(),
+                            span,
+                        ));
+                        None
+                    }
+                }
+            } // End MemberAccess case
             // Invalid L-value kind
             _ => {
                 self.errors.push(TypeError::InvalidAssignmentTarget(
@@ -1420,6 +1509,7 @@ impl TypeChecker {
                 // Recursive case: check the target of the index access
                 self.is_lvalue_base_mutable(target)
             }
+            ExpressionKind::MemberAccess { target, .. } => self.is_lvalue_base_mutable(target),
             // Add cases for field access later (e.g., struct.field) -> return self.is_lvalue_base_mutable(struct_expr)
             _ => false, // Other expression kinds are not mutable L-values bases
         }
@@ -1436,7 +1526,7 @@ impl TypeChecker {
         if let Some(ty) = node.get_type() {
             return Some(ty);
         }
-        let resolved =  match &node.kind {
+        let resolved = match &node.kind {
             TypeNodeKind::Simple(name) => {
                 match name.as_str() {
                     // Primitives

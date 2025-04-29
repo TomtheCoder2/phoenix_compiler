@@ -1122,4 +1122,82 @@ mod tests {
             _ => panic!("Expected ExpressionStmt"),
         }
     }
+    #[test]
+    fn test_parse_member_access() {
+        let input = "my_point.x;";
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::MemberAccess { target, field } => {
+                    assert_eq!(field, "x");
+                    match &target.kind {
+                        ExpressionKind::Variable(name) => assert_eq!(name, "my_point"),
+                        _ => panic!("Expected Variable for target"),
+                    }
+                }
+                _ => panic!("Expected MemberAccess expression"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
+    #[test]
+    fn test_parse_chained_member_access() {
+        let input = "my_line.start.y;";
+        // ... assert AST is ExprStmt(MemberAccess { target: MemberAccess { target: Var("my_line"), field: "start" }, field: "y" }) ...
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::MemberAccess { target, field } => {
+                    assert_eq!(field, "y");
+                    match &target.kind {
+                        ExpressionKind::MemberAccess { target: inner_target, field: inner_field } => {
+                            assert_eq!(inner_field, "start");
+                            match &inner_target.kind {
+                                ExpressionKind::Variable(name) => assert_eq!(name, "my_line"),
+                                _ => panic!("Expected Variable for inner target"),
+                            }
+                        }
+                        _ => panic!("Expected MemberAccess for outer target"),
+                    }
+                }
+                _ => panic!("Expected MemberAccess expression"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
+    #[test]
+    fn test_parse_member_assign() { // Test assignment TO a member access
+        let input = "my_point.x = 1;";
+        println!("input: {}", input);
+        // ... assert AST is ExprStmt(Assignment { target: MemberAccess{...}, value: IntLit(1) }) ...
+        let lexer = Lexer::new("test".to_string(), input);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program().unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].kind {
+            StatementKind::ExpressionStmt(expr) => match &expr.kind {
+                ExpressionKind::Assignment { target, value } => {
+                    match &target.kind {
+                        ExpressionKind::MemberAccess { target: inner_target, field } => {
+                            assert_eq!(field, "x");
+                            match &inner_target.kind {
+                                ExpressionKind::Variable(name) => assert_eq!(name, "my_point"),
+                                _ => panic!("Expected Variable for inner target"),
+                            }
+                        }
+                        _ => panic!("Expected MemberAccess for target"),
+                    }
+                    assert_eq!(value.kind, IntLiteral(1));
+                }
+                _ => panic!("Expected Assignment expression"),
+            },
+            _ => panic!("Expected ExpressionStmt"),
+        }
+    }
 }

@@ -5,6 +5,7 @@ mod tests {
         TypeNodeKind,
     };
     use crate::codegen::*;
+    use crate::symbol_table::SymbolTable;
     use crate::typechecker::TypeChecker;
     use crate::types::Type;
     use inkwell::context::Context;
@@ -18,7 +19,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         let expr = ExpressionKind::FloatLiteral(5.43);
         let result = compiler.compile_expression(&def(expr));
@@ -39,7 +41,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         let expr = Expression {
             kind: ExpressionKind::Variable("x".to_string()),
@@ -60,7 +63,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         let expr = def(ExpressionKind::BinaryOp {
             op: BinaryOperator::Add,
@@ -82,7 +86,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         let output_path = Path::new("test_output.o");
         let result = compiler.emit_object_file(output_path);
@@ -97,7 +102,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         let output_path = Path::new("/invalid_path/test_output.o");
         let result = compiler.emit_object_file(output_path);
@@ -114,7 +120,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         // Create a simple function: function add(a: Int, b: Int) -> Int { a + b }
         let params = vec![
@@ -194,7 +201,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
         // Create a function: fun returns_int(): int { return 10; }
         let body = Program {
             statements: vec![defs(StatementKind::ReturnStmt {
@@ -227,7 +235,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         // Create a function: fun returns_float(): float { return 3.14; }
         let body = Program {
@@ -261,7 +270,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         // Create a function: fun returns_bool(): bool { return true; }
         let body = Program {
@@ -295,7 +305,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         // Create a function: fun returns_void(): void { return; }
         let body = Program {
@@ -327,7 +338,8 @@ mod tests {
         let context = Context::create();
         let module = context.create_module("test");
         let builder = context.create_builder();
-        let mut compiler = Compiler::new(&context, &builder, &module);
+        let symbol_table = SymbolTable::new();
+        let mut compiler = Compiler::new(&context, &builder, &module, &symbol_table);
 
         // Create a function: fun implicit_void(): void { print_str("Implicit void"); }
         let body = Program {

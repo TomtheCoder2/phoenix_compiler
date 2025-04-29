@@ -106,6 +106,7 @@ enum Precedence {
     Prefix,      // -X or !X
     Call,        // myFunction(X)
     Index,       // array[index]
+    Member,      // . (dot access) // Added (highest precedence along with Call/Index)
 }
 
 // Map tokens to precedence levels
@@ -128,7 +129,8 @@ fn token_precedence(token: &TokenKind) -> Precedence {
         TokenKind::Plus | TokenKind::Minus => Precedence::Sum, // Infix minus
         TokenKind::Star | TokenKind::Slash => Precedence::Product,
         TokenKind::LParen => Precedence::Call,
-        TokenKind::LBracket => Precedence::Index, // Added
+        TokenKind::LBracket => Precedence::Index,
+        TokenKind::Dot => Precedence::Member, // Member access '.'
         _ => Lowest,
     }
 }
@@ -726,7 +728,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::SlashAssign => {
                     // Check if 'left' is a valid L-value (Variable or IndexAccess)
                     match left.kind {
-                        ExpressionKind::Variable(_) | ExpressionKind::IndexAccess { .. } => {
+                        ExpressionKind::Variable(_) | ExpressionKind::IndexAccess { .. } | ExpressionKind::MemberAccess { .. } => {
                             // OK, proceed with assignment
                         }
                         _ => {
@@ -826,6 +828,30 @@ impl<'a> Parser<'a> {
                         span,
                     );
                 }
+                // --- Member Access Operator ---
+                TokenKind::Dot => {
+                    self.next_token(); // Consume '.'
+                                       // Expect an identifier for the field name
+                    let field_token = self.current_token.clone();
+                    let field_name = match field_token.kind {
+                        TokenKind::Identifier(name) => name,
+                        _ => {
+                            return Err(ParseError::ExpectedIdentifier {
+                                loc: field_token.loc.clone(),
+                            })
+                        } // Use dot's location? Or field token loc?
+                    };
+                    self.next_token(); // Consume field identifier
+
+                    let span = left.span.combine(&Span::single(field_token.loc)); // Combine spans
+                    left = Expression::new(
+                        ExpressionKind::MemberAccess {
+                            target: Box::new(left),
+                            field: field_name,
+                        },
+                        span,
+                    );
+                } // End Dot case
                 // Not an operator we handle infix at this precedence
                 _ => break,
             }

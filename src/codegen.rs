@@ -811,6 +811,52 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // 6. Return the typed pointer to the element
                 Ok(elem_ptr_typed)
             }
+            // --- Member Access L-Value ---
+            ExpressionKind::MemberAccess { target: struct_expr, field } => {
+                // 1. Recursively get the pointer to the struct instance itself
+                //    This handles nested access like `line.start.x` correctly.
+                //    compile_lvalue_pointer on `line.start` returns PointerValue<Point>
+                let struct_ptr = self.compile_lvalue_pointer(struct_expr)?;
+
+                // 2. Get the LLVM StructType of the struct instance
+                let struct_toy_type = struct_expr.get_type().ok_or(
+                    CodeGenError::InvalidType(
+                        "Member access target has no type".into(),
+                        struct_expr.span.clone(),
+                    )
+                )?;
+                let llvm_struct_type = match self.get_llvm_basic_type(&struct_toy_type, &span)? {
+                    BasicTypeEnum::StructType(st) => st,
+                    _ => return Err(CodeGenError::InvalidType("L-Value target for member access is not a struct".into(), struct_expr.span.clone())),
+                };
+
+                // 3. Look up the field's index from the definition
+                //    Need access to struct definitions here! Pass symbol table or registry?
+                // HACK: Re-lookup struct definition for index. Needs refactor.
+                let struct_name = match struct_toy_type { Type::Struct{name} => name, _ => unreachable!() };
+                let struct_def = self.symbol_table.lookup_struct(&struct_name).unwrap(); // HACK: Assume access
+                let (field_index, _field_type) = struct_def.field_map.get(field).unwrap(); // HACK: Assume field exists
+
+                // 4. Build GEP instruction to get pointer to the field
+                //    Indices for struct GEP: 0 (for pointer deref), field_index
+                let field_ptr = match self.builder.build_struct_gep(
+                    llvm_struct_type, // Pass the StructType here
+                    struct_ptr,
+                    *field_index as u32, // Index of the field
+                    &format!(".{}", field) // Name hint for the GEP result pointer
+                ){
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("GEP failed: {}", e),
+                            span,
+                        ))
+                    }
+                }; // build_struct_gep returns Result
+
+                // 5. Return the typed pointer to the field
+                Ok(field_ptr)
+            } // End MemberAccess case
             _ => Err(CodeGenError::InvalidAssignmentTarget(
                 "Target expression is not assignable".into(),
                 span,
@@ -864,6 +910,32 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     }
                     None => Err(CodeGenError::UndefinedVariable(name.clone(), span)),
                 }
+            }
+            ExpressionKind::MemberAccess { .. } => { // Target and field available in expression.kind
+                // 1. Get the pointer to the field using the L-Value helper
+                let field_ptr = self.compile_lvalue_pointer(expr)?; // Pass the whole MemberAccess expression
+
+                // 2. Determine the type of the field to load
+                //    Get it from the resolved type of the MemberAccess expression itself
+                let field_toy_type = expr.get_type().ok_or(
+                    CodeGenError::InvalidType(
+                        "Member access expression has no type".into(),
+                        expr.span.clone(),
+                    )
+                )?;
+                let field_llvm_type = self.get_llvm_basic_type(&field_toy_type, &span)?;
+
+                // 3. Load the value from the field pointer
+                let loaded_value = match self.builder.build_load(field_llvm_type, field_ptr, "load_field"){
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("Load failed: {}", e),
+                            span,
+                        ))
+                    }
+                };
+                Ok(loaded_value)
             }
 
             ExpressionKind::StringLiteral(value) => {
@@ -2123,6 +2195,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         if let ExpressionKind::IndexAccess { target, index } = &target.kind {
             // Check if target is a vector
             if let Some(Type::Vector(_)) = target.get_type() {
+                return Some(target.get_type().unwrap());
+            }
+        }
+        // Check if target is a member access
+        if let ExpressionKind::MemberAccess { target, field, .. } = &target.kind {
+            // Check if target is a struct
+            if let Some(Type::Struct { name: _ }) = target.get_type() {
                 return Some(target.get_type().unwrap());
             }
         }
