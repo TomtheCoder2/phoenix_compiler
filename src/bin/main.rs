@@ -50,12 +50,28 @@ fn main() {
             return;
         }
     };
+    
+    let mut type_checker = TypeChecker::new();
+    // Type check the program
+    let symbol_table = match type_checker.check_program(&program) {
+        Ok(v) => {
+            println!("Type Checking Successful.");
+            v
+        }
+        Err(errors) => {
+            eprintln!("Type Checking Errors:");
+            for e in errors {
+                eprintln!("- {}", e);
+            }
+            return;
+        }
+    };
 
     // --- Code Generation ---
     let context = Context::create();
     let module = context.create_module("toy_module_obj"); // Module name
     let builder = context.create_builder();
-    let mut compiler = Compiler::new(&context, &builder, &module);
+    let mut compiler = Compiler::new(&context, &builder, &module, symbol_table);
 
     // Compile the program AST into the LLVM module
     match compiler.compile_program_to_module(&program) {
@@ -71,22 +87,6 @@ fn main() {
             return;
         }
     };
-
-    println!("\n--- Type Checking ---");
-    let mut type_checker = TypeChecker::new();
-    match type_checker.check_program(&program) {
-        // Call the checker
-        Ok(()) => {
-            println!("Type Checking Successful.");
-        }
-        Err(errors) => {
-            eprintln!("Type Checking Errors:");
-            for e in errors {
-                eprintln!("- {}", e);
-            }
-            std::process::exit(1); // Exit if errors found
-        }
-    }
 
     // --- Emit Object File ---
     let obj_path = Path::new(output_filename);

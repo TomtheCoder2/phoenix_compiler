@@ -38,23 +38,6 @@ pub enum TypeNodeKind {
                     // Add Function, Tuple etc. later
 }
 
-pub fn type_node_to_type(type_node: &TypeNode) -> Type {
-    match &type_node.kind {
-        TypeNodeKind::Simple(name) => match name.as_str() {
-            "int" => Type::Int,
-            "float" => Type::Float,
-            "bool" => Type::Bool,
-            "string" => Type::String,
-            "void" => Type::Void,
-            _ => panic!("Unknown type: {}", name),
-        },
-        TypeNodeKind::Vector(inner_type) => {
-            let inner = type_node_to_type(inner_type);
-            Type::Vector(Box::new(inner))
-        }
-    }
-}
-
 // Field definition within a struct AST node
 #[derive(Debug, PartialEq, Clone)]
 pub struct FieldDef {

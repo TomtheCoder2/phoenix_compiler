@@ -91,10 +91,11 @@ fn main() {
 
     println!("\n--- Type Checking ---");
     let mut type_checker = TypeChecker::new();
-    match type_checker.check_program(&program) {
+    let symbol_table = match type_checker.check_program(&program) {
         // Call the checker
-        Ok(()) => {
+        Ok(v) => {
             println!("Type Checking Successful.");
+            v
         }
         Err(errors) => {
             eprintln!("Type Checking Errors:");
@@ -103,7 +104,7 @@ fn main() {
             }
             std::process::exit(1); // Exit if errors found
         }
-    }
+    };
 
     // write the ast to file if verbose, write again because now it has type information
     if args.verbose {
@@ -112,13 +113,18 @@ fn main() {
             Ok(_) => println!("AST written to: {} (with type information)", ast_file_path.display()),
             Err(e) => eprintln!("Error writing AST to file: {}", e),
         }
+        let symbol_table_file_path = output_path.with_extension("sym");
+        match fs::write(&symbol_table_file_path, format!("{:#?}", symbol_table)) {
+            Ok(_) => println!("Symbol table written to: {}", symbol_table_file_path.display()),
+            Err(e) => eprintln!("Error writing symbol table to file: {}", e),
+        }
     }
 
     // Generate LLVM IR
     let context = Context::create();
     let module = context.create_module("toy_module_obj");
     let builder = context.create_builder();
-    let mut compiler = Compiler::new(&context, &builder, &module);
+    let mut compiler = Compiler::new(&context, &builder, &module, symbol_table);
 
     // Compile the program AST to LLVM IR
     match compiler.compile_program_to_module(&program) {

@@ -54,59 +54,6 @@ impl fmt::Display for Type {
 }
 
 impl Type {
-    /// Get the corresponding LLVM BasicTypeEnum
-    /// Panics if called on Type::Void or other non-basic types later.
-    pub fn to_llvm_basic_type<'ctx>(&self, context: &'ctx Context) -> Option<BasicTypeEnum<'ctx>> {
-        match self {
-            Type::Float => Some(context.f64_type().into()),
-            Type::Int => Some(context.i64_type().into()),
-            Type::Bool => Some(context.bool_type().into()),
-            // String represented as i8* (pointer is basic)
-            Type::String => Some(context.ptr_type(AddressSpace::default()).into()),
-            // Vector type maps to a pointer to our runtime struct (e.g., VecHeader*)
-            // For now, let's represent it as a generic pointer (void*) or opaque struct pointer.
-            // Need to define the runtime struct layout later.
-            // Let's use i8* as a placeholder for the vector handle pointer.
-            Type::Vector(_) => Some(context.ptr_type(AddressSpace::default()).into()),
-            Type::Void => None, // Void is not a basic type
-            Type::Struct { .. } => None, // Structs themselves aren't basic types
-        }
-    }
-
-    /// Get the corresponding LLVM AnyTypeEnum (includes void, functions etc.)
-    pub fn to_llvm_any_type<'ctx>(
-        &self,
-        context: &'ctx Context,
-        struct_definitions: &HashMap<String, inkwell::types::StructType<'ctx>>,
-    ) -> AnyTypeEnum<'ctx> {
-        match self {
-            Type::Float => context.f64_type().into(),
-            Type::Int => context.i64_type().into(),
-            Type::Bool => context.bool_type().into(),
-            Type::Void => context.void_type().into(),
-            Type::Struct { .. } => {
-                // Return the LLVM StructType itself
-                self.get_llvm_struct_type(context, struct_definitions)
-                    .map(|st| st.into()) // Convert StructType to AnyTypeEnum
-                    .unwrap_or_else(|| panic!("Struct type '{}' not found in LLVM definitions during AnyType conversion", self))
-                // Should be found if TC passed
-            }
-            _ => panic!("Unhandled type in to_llvm_any_type: {:?}", self),
-        }
-    }
-
-    // Get the LLVM StructType definition (requires lookup)
-    // This needs access to the struct registry/definitions. Pass it in?
-    pub fn get_llvm_struct_type<'ctx>(
-        &self,
-        context: &'ctx Context,
-        struct_definitions: &HashMap<String, inkwell::types::StructType<'ctx>>,
-    ) -> Option<inkwell::types::StructType<'ctx>> {
-        match self {
-            Type::Struct { name } => struct_definitions.get(&name.to_string()).copied(),
-            _ => None,
-        }
-    }
     // Optional: Helper to get specific LLVM types directly
     pub fn to_llvm_float_type<'ctx>(&self, context: &'ctx Context) -> Option<FloatType<'ctx>> {
         if *self == Type::Float {

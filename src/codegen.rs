@@ -3,8 +3,8 @@
 // Added BasicValueEnum
 use crate::ast;
 use crate::ast::{
-    type_node_to_type, BinaryOperator, ComparisonOperator, Expression, ExpressionKind,
-    LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
+    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program,
+    Statement, StatementKind, TypeNode, UnaryOperator,
 };
 use crate::location::{Location, Span};
 use crate::types::Type;
@@ -15,7 +15,9 @@ use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, StructType};
+use inkwell::types::{
+    AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, StructType,
+};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
@@ -24,6 +26,7 @@ use std::default::Default;
 use std::ffi::CString;
 use std::fmt;
 use std::path::Path;
+use crate::symbol_table::SymbolTable;
 
 const RUNTIME_VEC_NEW: &str = "_phoenix_vec_new"; // fn(elem_size: i64, capacity: i64) -> i8*
 const RUNTIME_VEC_GET_PTR: &str = "_phoenix_vec_get_ptr"; // fn(vec_handle: i8*, index: i64) -> i8* (pointer to element)
@@ -158,6 +161,8 @@ pub struct Compiler<'a, 'ctx> {
     context: &'ctx Context,
     builder: &'a Builder<'ctx>,
     module: &'a Module<'ctx>,
+    // symbol table from the type checker
+    symbol_table: &'a SymbolTable,
     // Symbol table now stores VariableInfo
     variables: HashMap<String, VariableInfo<'ctx>>,
     // Function map stores signature (params + return) along with FunctionValue
@@ -193,6 +198,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         context: &'ctx Context,
         builder: &'a Builder<'ctx>,
         module: &'a Module<'ctx>,
+        symbol_table: &'a SymbolTable,
     ) -> Self {
         // --- Initialize the Pass Manager ---
         let pass_manager_builder = PassManagerBuilder::create();
@@ -245,6 +251,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             str_free_func: None,
             str_concat_func: None,
             str_get_char_ptr_func: None,
+            symbol_table
         }
     }
 
@@ -278,11 +285,16 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             match &stmt.kind {
                 StatementKind::StructDef { name, fields } => {
                     // We need the resolved field types *now*. Type Checker should have annotated them.
-                    self.define_llvm_struct_type(name, fields,stmt.span.clone())?;
+                    self.define_llvm_struct_type(name, fields, stmt.span.clone())?;
                 }
-                StatementKind::FunctionDef { name, params, return_type_ann, .. } => {
+                StatementKind::FunctionDef {
+                    name,
+                    params,
+                    return_type_ann,
+                    ..
+                } => {
                     // Declare function signature using resolved types from AST nodes
-                    self.declare_llvm_function(name, params, return_type_ann,stmt.span.clone())?;
+                    self.declare_llvm_function(name, params, return_type_ann, stmt.span.clone())?;
                 }
                 _ => {}
             }
@@ -376,65 +388,225 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     }
 
     // Update helper to get resolved types from AST nodes
-    fn define_llvm_struct_type(&mut self, name: &str, fields_ast: &[ast::FieldDef], span: Span) -> Result<(), CodeGenError> {
-        if self.llvm_struct_types.contains_key(name) { 
-            return Err(CodeGenError::StructRedefinition(name.to_string(), span));
-        }
+    // Define LLVM struct types - potentially in two stages for recursion
+    fn define_llvm_struct_type(
+        &mut self,
+        name: &str,
+        fields_ast: &[ast::FieldDef],
+        span: Span,
+    ) -> Result<(), CodeGenError> {
+        // --- Stage 1: Create Opaque Struct Type (Handles Forward References) ---
+        // Create or get existing opaque type to allow recursive definitions like struct Node { next: Node }
+        let struct_type = match self.llvm_struct_types.get(name) {
+            Some(existing_type) => {
+                // Check if body is already set (error if trying to redefine)
+                if existing_type.is_sized() {
+                    return Err(CodeGenError::StructRedefinition(name.to_string(), span));
+                }
+                *existing_type // Use existing opaque type
+            }
+            None => {
+                // Create new opaque type and store it immediately
+                let opaque_type = self.context.opaque_struct_type(name);
+                self.llvm_struct_types.insert(name.to_string(), opaque_type);
+                opaque_type
+            }
+        };
 
+        // --- Stage 2: Resolve Field Types and Set Body ---
         let mut field_llvm_types = Vec::new();
         for field_def in fields_ast {
-            // --- Get resolved type from AST node's annotation ---
-            let toy_type = field_def.type_node.get_type() // Use the annotated type
-                .ok_or_else(|| CodeGenError::InvalidAstNode(format!(
-                    "Codegen: Type annotation for field '{}' in struct '{}' was not resolved by type checker",
-                    field_def.name, name), span.clone()))?;
-            // --- End Get resolved type ---
+            let phoenix_type = field_def.type_node.get_type().ok_or_else(|| {
+                CodeGenError::InvalidAstNode(
+                    format!("Field type not resolved for struct '{}'", name),
+                    field_def.type_node.span.clone(), // Use type node span
+                )
+            })?;
 
-            let llvm_basic_type = toy_type.to_llvm_basic_type(self.context) // Use resolved type
-                .ok_or_else(|| 
-                    CodeGenError::InvalidAstNode(format!(
-                        "Codegen: Type annotation for field '{}' in struct '{}' is not a basic type",
-                        field_def.name, name), span.clone()))?;
-            field_llvm_types.push(llvm_basic_type);
+            // Get the LLVM type for the field, handling nested structs
+            let llvm_field_type = self.get_llvm_basic_type(&phoenix_type, &span)?;
+            field_llvm_types.push(llvm_field_type);
         }
 
-        // Create named struct type directly
-        let struct_type = self.context.struct_type(&field_llvm_types, false);
-        self.llvm_struct_types.insert(name.to_string(), struct_type);
+        // Set the body of the (potentially opaque) struct type
+        struct_type.set_body(&field_llvm_types, false); // false = not packed
+
         Ok(())
     }
 
+    // src/codegen.rs -> declare_llvm_function
 
-    // Update helper to get resolved types from AST nodes
-    fn declare_llvm_function(&mut self, name: &str, params_ast: &[(String, Option<ast::TypeNode>)], ret_ann_node: &Option<ast::TypeNode>, span: Span) -> Result<(), CodeGenError> {
-        if self.functions.contains_key(name) { return Ok(()); }
+    fn declare_llvm_function(
+        &mut self,
+        name: &str,
+        params_ast: &[(String, Option<ast::TypeNode>)],
+        ret_ann_node: &Option<ast::TypeNode>,
+        span: Span,
+    ) -> Result<(), CodeGenError> {
+        if self.functions.contains_key(name) {
+            return Ok(());
+        } // Already declared
 
-        // Get resolved types from TypeNodes on AST
-        let param_types_res: Result<Vec<Type>, CodeGenError> = params_ast.iter()
+        // Get resolved phoenix param types from AST nodes
+        let param_types_res: Result<Vec<Type>, CodeGenError> = params_ast
+            .iter()
             .map(|(_, opt_node)| {
-                opt_node.as_ref()
-                    .and_then(|n| n.get_type()) // Get resolved type from node
-                    .ok_or_else(|| CodeGenError::InvalidAstNode(format!("Param type not resolved for func '{}'", name), span.clone()))
+                opt_node
+                    .as_ref()
+                    .and_then(|n| n.get_type()) // Get resolved type set by TypeChecker
+                    .ok_or_else(|| {
+                        CodeGenError::InvalidAstNode(
+                            format!("Param type not resolved for func '{}'", name),
+                            span.clone(),
+                        )
+                    })
             })
             .collect();
-        let param_types = param_types_res?;
+        let param_types = param_types_res?; // Vec<Type>
 
-        let return_type = ret_ann_node.as_ref()
-            .and_then(|n| n.get_type()) // Get resolved type from node
-            .unwrap_or(Type::Void); // Default Void if no annotation (TC should ensure this is ok)
+        // Get resolved phoenix return type from AST node
+        let return_type = ret_ann_node
+            .as_ref()
+            .and_then(|n| n.get_type())
+            .unwrap_or(Type::Void); // Default to Void if no annotation
 
+        // Convert phoenix param types to LLVM basic metadata types
+        let llvm_param_types_res: Result<Vec<_>, _> = param_types
+            .iter()
+            .map(|t| self.phoenix_type_to_llvm_basic_type(t, &span)) // Use helper
+            .collect();
+        let llvm_param_types: Vec<BasicMetadataTypeEnum> = llvm_param_types_res? // Check for errors from helper
+            .into_iter()
+            .map(|bt| bt.into()) // Convert BasicTypeEnum -> BasicMetadataTypeEnum
+            .collect();
 
-        // let llvm_param_types: Vec<_> = param_types.iter()
-        //     .map(|t| t.to_llvm_basic_type(self.context).unwrap().into()) // Assume basic for now
-        //     .collect();
-        let llvm_return_type = return_type.to_llvm_any_type(self.context, &self.llvm_struct_types);
-        let fn_type = llvm_return_type.into_function_type();
+        // --- FIX: Construct FunctionType correctly ---
+        // Get the LLVM return type (can be AnyType)
+        let llvm_return_type_any = self.phoenix_type_to_llvm_any_type(&return_type, &span)?;
 
-        let function = self.module.add_function(name, fn_type, None);
-        self.functions.insert(name.to_string(), (param_types, return_type, function));
+        // Create the FunctionType using the appropriate method based on return type kind
+        let fn_type = match llvm_return_type_any {
+            AnyTypeEnum::FloatType(ft) => ft.fn_type(&llvm_param_types, false),
+            AnyTypeEnum::IntType(it) => it.fn_type(&llvm_param_types, false),
+            AnyTypeEnum::PointerType(pt) => pt.fn_type(&llvm_param_types, false), // For string/vec/struct handles
+            AnyTypeEnum::StructType(st) => st.fn_type(&llvm_param_types, false), // Structs returned by value
+            AnyTypeEnum::VoidType(vt) => vt.fn_type(&llvm_param_types, false),   // For void return
+            // Add other AnyTypeEnum variants if needed (ArrayType, VectorType)
+            _ => {
+                return Err(CodeGenError::InvalidType(
+                    format!(
+                        "Unsupported return type for function '{}': {}",
+                        name, return_type
+                    ),
+                    span.clone(),
+                ))
+            }
+        };
+        // --- END FIX ---
+
+        let function = self.module.add_function(name, fn_type, None); // Use the constructed fn_type
+        self.functions
+            .insert(name.to_string(), (param_types, return_type, function));
         Ok(())
     }
 
+    // Helper to convert phoenix Type to LLVM Any Type (incl Void)
+    fn phoenix_type_to_llvm_any_type(
+        &self,
+        ty: &Type,
+        span: &Span,
+    ) -> Result<AnyTypeEnum<'ctx>, CodeGenError> {
+        match ty {
+            Type::Void => Ok(self.context.void_type().into()),
+            // For others, try getting basic type first
+            _ => self
+                .phoenix_type_to_llvm_basic_type(ty, span)
+                .map(|bt| bt.as_any_type_enum()),
+        }
+    }
+
+    // Converts a ToyLang Type into the corresponding LLVM BasicTypeEnum.
+    /// Handles struct lookup using the compiler's registry.
+    fn get_llvm_basic_type(
+        &self,
+        ty: &Type,
+        span: &Span,
+    ) -> Result<BasicTypeEnum<'ctx>, CodeGenError> {
+        match ty {
+            Type::Int => Ok(self.context.i64_type().into()),
+            Type::Float => Ok(self.context.f64_type().into()),
+            Type::Bool => Ok(self.context.bool_type().into()),
+            // Handles (pointers) for String and Vector are basic types
+            Type::String | Type::Vector(_) => Ok(self
+                .context
+                .i8_type()
+                .ptr_type(AddressSpace::default())
+                .into()),
+            // Structs are also basic aggregate types in LLVM
+            Type::Struct { name } => {
+                self.llvm_struct_types
+                    .get(&name.to_string())
+                    .copied() // Get the stored StructType<'ctx>
+                    .map(|st| st.into()) // Convert StructType into BasicTypeEnum
+                    .ok_or_else(|| {
+                        CodeGenError::InvalidType(
+                            format!(
+                                "CodeGen: Struct type '{}' not found in LLVM definitions.",
+                                name
+                            ),
+                            span.clone(),
+                        )
+                    })
+            }
+            Type::Void => Err(CodeGenError::InvalidType(
+                "Cannot get basic LLVM type for void".into(),
+                span.clone(),
+            )),
+        }
+    }
+
+    /// Converts a ToyLang Type into the corresponding LLVM AnyTypeEnum.
+    /// Handles void and calls get_llvm_basic_type for others.
+    fn get_llvm_any_type(&self, ty: &Type, span: &Span) -> Result<AnyTypeEnum<'ctx>, CodeGenError> {
+        match ty {
+            Type::Void => Ok(self.context.void_type().into()),
+            // For all others, try getting the BasicTypeEnum first
+            _ => self
+                .get_llvm_basic_type(ty, span)
+                .map(|bt| bt.as_any_type_enum()),
+        }
+    }
+
+    // Helper to convert phoenix Type to LLVM Basic Type, looking up structs
+    fn phoenix_type_to_llvm_basic_type(
+        &self,
+        ty: &Type,
+        span: &Span,
+    ) -> Result<BasicTypeEnum<'ctx>, CodeGenError> {
+        match ty {
+            Type::Int => Ok(self.context.i64_type().into()),
+            Type::Float => Ok(self.context.f64_type().into()),
+            Type::Bool => Ok(self.context.bool_type().into()),
+            Type::String | Type::Vector(_) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
+            Type::Struct { name } => {
+                self.llvm_struct_types
+                    .get(&name.to_string())
+                    .map(|st| (*st).into()) // Convert StructType to BasicTypeEnum
+                    .ok_or_else(|| {
+                        CodeGenError::InvalidType(
+                            format!("Struct '{}' not found in LLVM defs", name),
+                            span.clone(),
+                        )
+                    })
+            }
+            Type::Void => Err(CodeGenError::InvalidType(
+                "Cannot use void as basic type".into(),
+                span.clone(),
+            )),
+        }
+    }
     // Helper to get the type of an expression - NEEDS TYPE CHECKING PHASE ideally
     // For now, we infer based on structure, which is LIMITED and UNSAFE.
     fn infer_expression_type(&self, expr: &Expression) -> Result<Type, CodeGenError> {
@@ -496,10 +668,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         global
     }
 
-    // Helper to create an alloca instruction in the function's entry block
-    // This ensures all allocas happen at the start, which is good practice in LLVM.
-    // Alloca helper now needs the phoenix Type to allocate correctly
-    fn create_entry_block_alloca(&self, name: &str, ty: Type) -> PointerValue<'ctx> {
+    // Alloca helper revised to handle structs and other potential aggregate types
+    fn create_entry_block_alloca(&self, name: &str, ty: Type, span: &Span) -> PointerValue<'ctx> {
         let temp_builder = self.context.create_builder();
         // Ensure current_function is set before calling this
         let entry_block = self
@@ -511,15 +681,27 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             Some(first_instr) => temp_builder.position_before(&first_instr),
             None => temp_builder.position_at_end(entry_block),
         };
-        // Allocate memory for the correct LLVM type based on phoenix Type
-        let llvm_type = match ty.to_llvm_basic_type(self.context) {
-            Some(llvm_type) => llvm_type,
-            None => {
-                panic!("Invalid type for variable '{}'", name);
+
+        let llvm_type_for_alloca = match self.get_llvm_basic_type(&ty, span) {
+            Ok(llvm_type) => llvm_type,
+            Err(e) => {
+                panic!("Failed to get LLVM type for alloca: {}", e);
             }
         };
-        // todo: check if unwrap is safe
-        temp_builder.build_alloca(llvm_type, name).unwrap()
+
+        // build_alloca takes a BasicType, which StructType implements
+        match temp_builder.build_alloca(llvm_type_for_alloca, name) {
+            Ok(ptr) => {
+                // Set the pointer to the current function's entry block
+                ptr.set_name(name);
+                ptr
+            }
+            Err(e) => {
+                panic!("Failed to create alloca for '{}': {}", name, e);
+            }
+        }
+        // Removed unwrap - build_alloca itself doesn't return Result in recent inkwell?
+        // If it does, handle the error properly. Let's assume it returns PointerValue directly.
     }
 
     // Helper to compile an L-Value expression into a *pointer* to the location.
@@ -569,7 +751,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
 
                 // 3. Get element type from vec_expr's resolved type
                 let target_resolved_type = vec_expr.get_type();
-                let elem_toy_type = match target_resolved_type {
+                let elem_phoenix_type = match target_resolved_type {
                     Some(Type::Vector(et)) => *et,
                     _ => {
                         return Err(CodeGenError::InvalidType(
@@ -578,7 +760,14 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         ))
                     }
                 };
-                let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
+                let elem_llvm_type = self
+                    .get_llvm_basic_type(&elem_phoenix_type, &span)
+                    .map_err(|e| {
+                        CodeGenError::InvalidType(
+                            format!("Failed to get LLVM type for vector element: {}", e),
+                            span.clone(),
+                        )
+                    })?;
 
                 // 4. Call runtime vec_get_ptr(handle, index) -> i8*
                 let vec_get_ptr_func = self.get_or_declare_vec_get_ptr();
@@ -656,13 +845,13 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ExpressionKind::Variable(name) => {
                 match self.variables.get(name) {
                     Some(info) => {
-                        let llvm_type = match info.ty.to_llvm_basic_type(self.context) {
-                            Some(llvm_type) => llvm_type,
-                            None => {
-                                return Err(CodeGenError::InvalidType(
-                                    format!("Invalid type for variable '{}'", name),
+                        let llvm_type = match self.get_llvm_basic_type(&info.ty, &span) {
+                            Ok(llvm_type) => llvm_type,
+                            Err(e) => {
+                                return Err(CodeGenError::LlvmError(
+                                    format!("Load failed: {}", e),
                                     span,
-                                ))
+                                ));
                             }
                         };
                         let loaded_val = self
@@ -697,7 +886,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         return Err(CodeGenError::LlvmError(format!("GEP failed: {}", e), span))
                     }
                 };
-                // 3. Call runtime _toylang_str_new(c_str_ptr)
+                // 3. Call runtime _phoenix_str_new(c_str_ptr)
                 let str_new_func = self.get_or_declare_str_new();
                 let str_handle = match self.builder.build_call(
                     str_new_func,
@@ -723,103 +912,101 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 Ok(str_handle.into())
             }
 
+            // src/codegen.rs -> impl Compiler -> compile_expression
+
             // --- Struct Literal ---
-            ExpressionKind::StructLiteral {
-                struct_name,
-                fields,
-            } => {
+            ExpressionKind::StructLiteral { struct_name, fields } => {
                 // 1. Get the LLVM struct type definition
-                let struct_llvm_type = self
-                    .llvm_struct_types
-                    .get(struct_name)
-                    .ok_or_else(|| {
-                        CodeGenError::InvalidAstNode(
-                            format!(
-                                "Struct type '{}' not found in LLVM definitions",
-                                struct_name
-                            ),
-                            span.clone(),
-                        )
-                    })?
-                    .clone(); // Should be impossible if TC passed
+                let struct_llvm_type = self.llvm_struct_types.get(struct_name)
+                    .ok_or_else(||
+                        CodeGenError::InvalidType(
+                            format!("Struct type '{}' not found in LLVM definitions.", struct_name),
+                            expr.span.clone(),
+                        ))? // Error if not found
+                    .as_basic_type_enum() // Convert StructType to BasicTypeEnum
+                    .into_struct_type(); // Convert back to StructType (safe)
 
-                // 2. Compile field initializer expressions
-                // Need to match order with struct definition! Type checker ensures presence/absence/names.
-                // Retrieve field order from stored definition (requires access to TC info or struct def map)
-                // HACK: Assume fields in literal are in correct order for now. TC should verify order?
-                let mut field_values = Vec::with_capacity(fields.len());
-                for init_field in fields {
-                    let value = self.compile_expression(&init_field.value)?;
-                    // TODO: Check value type matches expected field type from struct def
-                    field_values.push(value);
-                }
 
-                // 3. Create LLVM struct value
-                // Can we create const_struct if all fields are const? Harder check.
-                // Build it on the stack using insertvalue for now? Or directly?
-                // Let's try building the struct value directly if possible.
-                // Need BasicValueEnum, not mixed types.
-                let field_basic_values: Vec<BasicValueEnum<'ctx>> =
-                    field_values.into_iter().collect();
-
-                // Create the struct value
-                let struct_value = struct_llvm_type.const_named_struct(&field_basic_values);
-                // const_named_struct might only work for constants?
-                // If not all const, need to `alloca` struct, then `gep` + `store` each field.
-
-                // --- Let's use Alloca + GEP + Store (more general) ---
-                // a. Allocate stack space for the struct
-                let struct_alloca = match self.builder.build_alloca(struct_llvm_type, struct_name) {
-                    Ok(alloca) => alloca,
+                // 2. Allocate stack space FOR THE RESULTING STRUCT VALUE
+                //    We build the struct on the stack temporarily.
+                //    The variable binding (`let line1 = ...`) or assignment
+                //    will then handle storing this result value appropriately.
+                let struct_alloca =  match self.builder.build_alloca(struct_llvm_type, &format!("{}_literal", struct_name)){
+                    Ok(ptr) => ptr,
                     Err(e) => {
                         return Err(CodeGenError::LlvmError(
-                            format!("Struct alloca failed: {}", e),
+                            format!("Failed to allocate struct literal: {}", e),
+                            expr.span.clone(),
+                        ))
+                    }
+                };
+
+                // 3. Compile field initializers and store them into the allocated struct
+                //    Use the definition's field order for GEP indices.
+                let struct_def = self.symbol_table.lookup_struct(struct_name) // Need access to TC's symbol table or stored defs
+                    .ok_or_else(||
+                        CodeGenError::InvalidType(
+                            format!("Struct type '{}' not found in symbol table.", struct_name),
+                            expr.span.clone(),
+                        ))?; // Error if not found
+
+                // Check if literal provides all fields and no extras (TC should do this)
+                // Build map of provided initializers for lookup
+                let mut init_map: HashMap<String, &Expression> = HashMap::new();
+                for init_field in fields {
+                    init_map.insert(init_field.name.clone(), &init_field.value);
+                }
+
+                // Iterate through the *definition's* fields in order
+                for (index, (field_name, expected_field_type)) in struct_def.fields.iter().enumerate() {
+                    // Find the corresponding initializer value from the literal AST
+                    let init_value_expr = init_map.get(field_name)
+                        .ok_or_else(|| CodeGenError::InvalidAstNode(format!(
+                            "Codegen: Missing initializer for field '{}' in struct '{}' literal (TC should catch)",
+                            field_name, struct_name), span.clone()))?;
+
+                    // Compile the initializer expression
+                    let field_value = self.compile_expression(init_value_expr)?;
+
+                    // Defensive type check (TC should guarantee)
+                    let field_llvm_type = self.get_llvm_basic_type(expected_field_type, &span)?;
+                    if field_value.get_type() != field_llvm_type {
+                        return Err(CodeGenError::InvalidType(
+                            format!("Field '{}' in struct literal has wrong type (expected {}, got {})",
+                                field_name, expected_field_type, field_value.get_type()),
+                            span.clone(),
+                        ));
+                    }
+
+
+                    // GEP to get pointer to field index within the allocated struct
+                    let field_ptr = match self.builder.build_struct_gep(struct_llvm_type, struct_alloca, index as u32, &format!("{}.{}", struct_name, field_name)){
+                        Ok(ptr) => ptr,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("GEP failed for struct field '{}': {}", field_name, e),
+                                span.clone(),
+                            ))
+                        }
+                    };
+                    // Store compiled value
+                    self.builder.build_store(field_ptr, field_value);
+                }
+
+
+                // 4. Load the fully constructed struct value from the stack allocation
+                let loaded_struct_value = match self.builder.build_load(struct_llvm_type, struct_alloca, "load_struct_literal"){
+                    Ok(val) => val,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("Failed to load struct literal: {}", e),
                             span.clone(),
                         ))
                     }
                 };
 
-                // b. Store each compiled field value into the allocation
-                for (index, init_field) in fields.iter().enumerate() {
-                    // Assumes literal order matches def order!
-                    let field_value = self.compile_expression(&init_field.value)?;
-                    // GEP to get pointer to field index
-                    let field_ptr = self
-                        .builder
-                        .build_struct_gep(
-                            struct_llvm_type,
-                            struct_alloca,
-                            index as u32,
-                            &format!("{}.{}", struct_name, init_field.name),
-                        )
-                        .map_err(|e| {
-                            CodeGenError::LlvmError(
-                                format!("Struct GEP failed: {}", e),
-                                span.clone(),
-                            )
-                        })?;
-                    // Store value
-                    self.builder.build_store(field_ptr, field_value);
-                }
-
-                // c. How to return the struct value?
-                // If treated like basic types, need to LOAD from alloca.
-                // If passed by reference, return the alloca pointer?
-                // Let's assume we return the value (load from stack) for now.
-                let loaded_struct =
-                    match self
-                        .builder
-                        .build_load(struct_llvm_type, struct_alloca, "load_struct")
-                    {
-                        Ok(loaded) => loaded,
-                        Err(e) => {
-                            return Err(CodeGenError::LlvmError(
-                                format!("Struct load failed: {}", e),
-                                span.clone(),
-                            ))
-                        }
-                    };
-                Ok(loaded_struct) // Return StructValue wrapped in BasicValueEnum
+                // 5. The expression's result IS the loaded struct value
+                Ok(loaded_struct_value) // Returns StructValue wrapped in BasicValueEnum
             } // End StructLiteral
 
             // Arithmetic Operations (Example: requires operands to be the same type for now)
@@ -1470,7 +1657,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     // Get Element Type (Needs info passed from Type Checker!)
                     let vec_expr_node = &args[0]; // The AST node for the vector expression
                     let vec_resolved_type = vec_expr_node.get_type();
-                    let elem_toy_type = match vec_resolved_type {
+                    let elem_phoenix_type = match vec_resolved_type {
                         Some(Type::Vector(et)) => *et,
                         _ => {
                             return Err(CodeGenError::InvalidType(
@@ -1482,7 +1669,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             ))
                         }
                     };
-                    let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
+                    let elem_llvm_type =
+                        self.phoenix_type_to_llvm_basic_type(&elem_phoenix_type, &span)?;
 
                     // Call runtime vec_pop(handle) -> i8* (pointer to popped data)
                     let vec_pop_func = self.get_or_declare_vec_pop();
@@ -1561,18 +1749,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                     for (i, arg_expr) in args.iter().enumerate() {
                         let arg_val = self.compile_expression(arg_expr)?;
                         let expected_llvm_type =
-                            match param_types[i].to_llvm_basic_type(self.context) {
-                                Some(llvm_type) => llvm_type,
-                                None => {
-                                    return Err(CodeGenError::InvalidType(
-                                        format!(
-                                            "Invalid type for argument {} in function '{}'",
-                                            i, name
-                                        ),
-                                        span,
-                                    ))
-                                }
-                            };
+                            self.phoenix_type_to_llvm_basic_type(&param_types[i], &span)?;
                         // --- Type Checking/Conversion (Basic) ---
                         if arg_val.get_type() != expected_llvm_type {
                             // Attempt basic conversion (e.g., int to float) if needed later
@@ -1606,15 +1783,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         _ => {
                             // Expect Int, Float, or Bool
                             let expected_llvm_ret_type =
-                                match return_type.to_llvm_basic_type(self.context) {
-                                    Some(llvm_type) => llvm_type,
-                                    None => {
-                                        return Err(CodeGenError::InvalidType(
-                                            format!("Invalid return type for function '{}'", name),
-                                            span,
-                                        ))
-                                    }
-                                };
+                                self.phoenix_type_to_llvm_basic_type(&return_type, &span)?;
                             match call_site_val.try_as_basic_value().left() {
                                 Some(ret_val) if ret_val.get_type() == expected_llvm_ret_type => {
                                     Ok(ret_val)
@@ -1651,8 +1820,9 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                             ),
                             value.span.clone(),
                         ))?;
-                let expected_rhs_llvm_type_opt = target_type.to_llvm_basic_type(self.context); // Get LLVM type from ToyLang Type
-                let Some(expected_rhs_llvm_type) = expected_rhs_llvm_type_opt else {
+                let expected_rhs_llvm_type_opt =
+                    self.phoenix_type_to_llvm_basic_type(&target_type, &span);
+                let Ok(expected_rhs_llvm_type) = expected_rhs_llvm_type_opt else {
                     // Handle case where target type (e.g., Void) doesn't map to BasicType
                     return Err(CodeGenError::InvalidType(
                         format!(
@@ -1813,7 +1983,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ExpressionKind::VectorLiteral { elements } => {
                 // --- Determine Element Type (Using resolved type from AST) ---
                 let vector_type = expr.get_type().unwrap_or(Type::Void); // Get vec<T> type
-                let elem_toy_type = match vector_type {
+                let elem_phoenix_type = match vector_type {
                     Type::Vector(et) => *et,
                     _ => {
                         return Err(CodeGenError::InvalidType(
@@ -1822,11 +1992,12 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         ))
                     }
                 };
-                if elem_toy_type == Type::Void { /* Error */ }
+                if elem_phoenix_type == Type::Void { /* Error */ }
                 // Get size of ELEMENT for vec_new, but size of HANDLE if elements are vectors
                 // No, vec_new takes element size. If elem is vec<int>, size is pointer size.
-                let elem_size = self.get_sizeof(&elem_toy_type).unwrap();
-                let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap(); // Basic type of element (e.g., i8*, i64)
+                let elem_size = self.get_sizeof(&elem_phoenix_type).unwrap();
+                let elem_llvm_type =
+                    self.phoenix_type_to_llvm_basic_type(&elem_phoenix_type, &span)?;
 
                 // --- Call vec_new ---
                 let vec_new_func = self.get_or_declare_vec_new();
@@ -1906,7 +2077,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // Load the value from the element pointer
                 // Need the element LLVM type again here
                 let target_resolved_type = target.get_type();
-                let elem_toy_type = match target_resolved_type {
+                let elem_phoenix_type = match target_resolved_type {
                     Some(Type::Vector(et)) => *et,
                     _ => {
                         return Err(CodeGenError::InvalidType(
@@ -1918,7 +2089,8 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         ))
                     }
                 };
-                let elem_llvm_type = elem_toy_type.to_llvm_basic_type(self.context).unwrap();
+                let elem_llvm_type =
+                    self.phoenix_type_to_llvm_basic_type(&elem_phoenix_type, &span)?;
 
                 let loaded_val =
                     match self
@@ -1938,7 +2110,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         } // End match expr
     }
 
-    // Ensure check_lvalue_expression returns the correct ToyLang Type
+    // Ensure check_lvalue_expression returns the correct phoenix Type
     fn check_lvalue_expression(&mut self, target: &Expression) -> Option<Type> {
         // Check if target is a variable
         if let ExpressionKind::Variable(var_name) = &target.kind {
@@ -2206,7 +2378,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
     }
 
     // Get size of a phoenix Type in bytes (basic implementation)
-    // Get size of a ToyLang Type in bytes
+    // Get size of a phoenix Type in bytes
     fn get_sizeof(&self, ty: &Type) -> Option<u64> {
         // Needs target machine data layout! Hardcoding 64-bit pointer size.
         // todo: Use target machine data layout for pointer size
@@ -2491,179 +2663,120 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 Ok((None, false))
             }
 
+            // src/codegen.rs -> compile_statement -> FunctionDef case
             StatementKind::FunctionDef {
                 name,
                 params,
                 return_type_ann,
                 body,
             } => {
-                // Signature/LLVM Function created in first pass. Compile body now.
-                if let Some((_, _, function)) = self.functions.get(name) {
-                    // let current_func_backup = self.current_function;
-                    // let current_ret_type_backup = self.current_function_return_type;
-                    // let vars_backup = self.variables.clone();
+                // --- Check if already compiled (maybe from declare pass) ---
+                // Need to decide if we recompile body or just skip if already done.
+                // Let's assume compile_program_to_module handles passes correctly and
+                // we just need to compile the body *if* we are the main compile pass.
+                // This logic might need refinement based on the exact pass structure.
 
-                    // --- Determine Param and Return Types ---
-                    // Use annotations, default to float for now if missing (NEEDS TYPE CHECKING)
-                    // --- Determine Param and Return Types ---
-                    let toy_param_types: Vec<Type> = params
+                // Retrieve function info stored during declaration pass
+                if let Some((phoenix_param_types, phoenix_return_type, function)) =
+                    self.functions.get(name).cloned()
+                {
+                    // Clone needed data
+
+                    // --- FIX: Use correct helper for parameter types ---
+                    let llvm_param_types_res: Result<Vec<_>, _> = phoenix_param_types
                         .iter()
-                        .map(|param| {
-                            // param.type_ann is Option<Type>
-                            // convert type_ann: TypeNode to Type with type_node_to_type
-                            match &param.1 {
-                                Some(type_node) => Some(type_node_to_type(type_node)),
-                                None => None, // Default to Float if no type annotation
-                            }
-                            .unwrap_or(Type::Void)
-                        })
+                        .map(|t| self.phoenix_type_to_llvm_basic_type(t, &span)) // Use helper that handles structs/pointers
                         .collect();
-                    // convert type_ann: TypeNode to Type with type_node_to_type
-                    let type_ann = match return_type_ann {
-                        Some(type_node) => Some(type_node_to_type(type_node)),
-                        None => None, // Default to Float if no type annotation
-                    };
-                    let toy_return_type = type_ann.unwrap_or(Type::Void); // Default Float (improve later)
-
-                    let llvm_param_types: Result<Vec<BasicMetadataTypeEnum>, CodeGenError> =
-                        toy_param_types
-                            .iter()
-                            .map(|ty| match ty.to_llvm_basic_type(self.context) {
-                                Some(llvm_type) => Ok(llvm_type.into()),
-                                None => Err(CodeGenError::InvalidType(
-                                    "Unsupported parameter type".to_string(),
-                                    span.clone(),
-                                )),
-                            })
-                            .collect(); // Collects into Result<Vec<_>, _>
-
-                    let llvm_param_types = llvm_param_types?; // Propagate error if any
-                    let fn_type = match toy_return_type {
-                        Type::Float => self.context.f64_type().fn_type(&llvm_param_types, false),
-                        Type::Int => self.context.i64_type().fn_type(&llvm_param_types, false),
-                        Type::Bool => self.context.bool_type().fn_type(&llvm_param_types, false),
-                        Type::Void => self.context.void_type().fn_type(&llvm_param_types, false),
-                        Type::String => {
-                            // String is represented as a pointer (i8*)
-                            self.context
-                                .i8_type()
-                                .ptr_type(AddressSpace::default())
-                                .fn_type(&llvm_param_types, false)
-                        } // Add other types like Pointer, Array, Struct later if needed
-                        Type::Vector(_) => {
-                            // Vector is represented as a pointer (i8*)
-                            self.context
-                                .ptr_type(AddressSpace::default())
-                                .fn_type(&llvm_param_types, false)
-                        }
-                        Type::Struct { .. } => {
-                            // Struct is represented as a pointer (i8*)
-                            self.context
-                                .ptr_type(AddressSpace::default())
-                                .fn_type(&llvm_param_types, false)
-                        }
-                    };
-
-                    let function = self.module.add_function(name, fn_type, None);
-                    // Store signature with FunctionValue
-                    self.functions.insert(
-                        name.clone(),
-                        (toy_param_types.clone(), toy_return_type.clone(), function),
-                    );
+                    let llvm_param_types = llvm_param_types_res?; // Check for errors from helper
+                                                                  // --- END FIX ---
 
                     // --- Setup Function Body Context ---
                     let entry_block = self.context.append_basic_block(function, "entry");
                     let original_builder_pos = self.builder.get_insert_block();
                     let original_func = self.current_function;
                     let original_vars = self.variables.clone();
-                    let original_ret_type = self.current_function_return_type.clone(); // Save outer return type
+                    let original_ret_type = self.current_function_return_type.clone();
 
                     self.builder.position_at_end(entry_block);
                     self.current_function = Some(function);
-                    self.current_function_return_type = Some(toy_return_type.clone()); // Set expected return type
+                    self.current_function_return_type = Some(phoenix_return_type); // Use resolved type
                     self.variables.clear();
 
-                    // --- Allocate and Store Parameters (using determined types) ---
+                    // --- Allocate and Store Parameters ---
                     for (i, (param_name, _)) in params.iter().enumerate() {
-                        let param_toy_type = toy_param_types[i].clone(); // Get the type we determined
-                        let llvm_param = function.get_nth_param(i as u32).unwrap();
-                        llvm_param.set_name(param_name);
-                        // llvm_param should already have the correct LLVM type from fn_type
+                        if i < phoenix_param_types.len() {
+                            // Bounds check
+                            let param_phoenix_type = phoenix_param_types[i].clone(); // Use resolved type
+                            let llvm_param = function.get_nth_param(i as u32).unwrap();
+                            llvm_param.set_name(param_name);
 
-                        let param_alloca =
-                            self.create_entry_block_alloca(param_name, param_toy_type.clone());
-                        self.builder.build_store(param_alloca, llvm_param);
-                        self.variables.insert(
-                            param_name.clone(),
-                            VariableInfo {
-                                ptr: param_alloca,
-                                ty: param_toy_type,
-                                is_mutable: false,
-                            },
-                        );
+                            // Check if LLVM param type matches expected basic type
+                            let expected_llvm_basic_type =
+                                self.phoenix_type_to_llvm_basic_type(&param_phoenix_type, &span)?;
+                            if llvm_param.get_type() != expected_llvm_basic_type {
+                                return Err(CodeGenError::InvalidType(
+                                    format!(
+                                        "Internal: LLVM param type mismatch for '{}'",
+                                        param_name
+                                    ),
+                                    span.clone(),
+                                ));
+                            }
+
+                            let param_alloca = self.create_entry_block_alloca(
+                                param_name,
+                                param_phoenix_type.clone(),
+                                &span,
+                            );
+                            self.builder.build_store(param_alloca, llvm_param);
+                            self.variables.insert(
+                                param_name.clone(),
+                                VariableInfo {
+                                    ptr: param_alloca,
+                                    ty: param_phoenix_type,
+                                    is_mutable: false,
+                                },
+                            );
+                        }
                     }
 
-                    let signature = self.functions.get(name).cloned().unwrap(); // Assume defined
+                    // --- Compile Body & Handle Return ---
+                    let body_terminated = match self.compile_program_block(body) {
+                        Ok(terminated) => terminated,
+                        Err(err) => {
+                            // Handle error during body compilation
+                            self.variables = original_vars; // Restore original variables
+                            self.current_function = original_func; // Restore original function
+                            self.current_function_return_type = original_ret_type; // Restore return type
+                            if let Some(bb) = original_builder_pos {
+                                self.builder.position_at_end(bb);
+                            } // Restore builder position
+                            return Err(err);
+                        }
+                    };
 
-                    // Compile the body statements, check if body guaranteed termination
-                    let mut body_terminated = false;
-                    let mut body_compile_error = None;
-                    match self.compile_program_block(body) {
-                        // Use helper, returns Result<bool>
-                        Ok(terminated) => body_terminated = terminated,
-                        Err(e) => body_compile_error = Some(e), // Capture error
-                    }
-
-                    // Handle compilation errors first
-                    if let Some(err) = body_compile_error {
-                        // Handle function compilation error
-                        return Err(err);
-                    }
-
-                    // Check if Block Explicitly Returned implicitly via its structure
-                    // --- Check if Block Needs Return ---
                     let needs_explicit_return_syntactically = self
                         .builder
                         .get_insert_block()
                         .map_or(true, |bb| bb.get_terminator().is_none());
 
                     if needs_explicit_return_syntactically {
-                        // Function reached end without terminator
-                        match signature.1 {
-                            // signature.1 is return type
-                            Type::Void => {
-                                // OK to implicitly return void
-                                self.builder.build_return(None);
-                            }
-                            non_void_type => {
-                                // ERROR: Non-void function reached end without return.
-                                // Type checker *should* have caught this if path analysis existed.
-                                // Codegen cannot proceed meaningfully.
-                                // We could insert 'unreachable' or just let verification fail.
-                                // Let's let verification fail for now by not adding a terminator.
-                                eprintln!("Codegen Error: Non-void function '{}' ({}) reached end without returning a value.", name, non_void_type);
-                                // No build_return here! Verification will fail.
-                            }
-                        }
+                        // Generate implicit return for non-void functions
+                        self.builder.build_return(None);
                     }
 
                     // --- Restore Outer Context ---
                     self.variables = original_vars;
                     self.current_function = original_func;
-                    self.current_function_return_type = original_ret_type; // Restore outer return type
+                    self.current_function_return_type = original_ret_type;
                     if let Some(bb) = original_builder_pos {
                         self.builder.position_at_end(bb);
                     }
 
-                    // --- Handle errors / Verification / Optimization ---
-                    // ... (similar logic, run FPM, check verification) ...
-                    if body_compile_error.is_some() || !function.verify(true) {
-                        // Handle function verification failure
-                        if let Some(err) = body_compile_error {
-                            return Err(err);
-                        }
+                    // --- Verify and Optimize ---
+                    if !function.verify(true) {
                         return Err(CodeGenError::LlvmError(
-                            "Function verification failed".to_string(),
+                            "Function verification failed before optimization".to_string(),
                             span,
                         ));
                     }
@@ -2675,15 +2788,19 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                         ));
                     }
 
-                    Ok((None, false))
+                    Ok((None, false)) // Def doesn't terminate outer block
                 } else {
                     Err(CodeGenError::InvalidAstNode(
-                        format!("Function '{}' not found during body compilation", name),
+                        format!(
+                            "Function '{}' signature not found during body compilation",
+                            name
+                        ),
                         span,
-                    )) // Should not happen
+                    ))
                 }
             } // End FunctionDef
-        } // End match stmt
+              // ... other statement kinds ...
+        } // End match statement kind
     }
 
     fn compile_var_let_stmt(
@@ -2702,7 +2819,6 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         let var_type = match value.get_type() {
             // Use helper to get Option<Type>
             Some(ty) => {
-                
                 ty // Use the type from the value expression
             }
             None => {
@@ -2727,41 +2843,41 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             ));
         }
         // --- Type Check (Codegen sanity check) ---
-        // The type checker should ensure this, but a check here is defensive.
-        let expected_llvm_type = match var_type.to_llvm_basic_type(self.context) {
-            Some(t) => t,
-            None if var_type == Type::Void => {
-                // This error should have been caught by type checker (VoidAssignment)
-                return Err(CodeGenError::InvalidType(
-                    "Cannot create variable of type void".to_string(),
-                    span,
-                ));
-            }
-            None => {
-                // Should not happen for valid storable types
-                return Err(CodeGenError::InvalidType(
-                    format!("Cannot get basic LLVM type for variable type {}", var_type),
-                    span,
-                ));
-            }
-        };
-
-        if compiled_value.get_type() != expected_llvm_type {
-            // This indicates an internal error OR missing type conversion step
-            return Err(CodeGenError::InvalidType(
-                format!(
-                    "Internal Error: RHS value type {} does not match variable type {} for '{}'",
-                    compiled_value.get_type(),
-                    expected_llvm_type,
-                    name
-                ),
-                span,
-            ));
-        }
+        // // The type checker should ensure this, but a check here is defensive.
+        // let expected_llvm_type = match var_type.to_llvm_basic_type(self.context) {
+        //     Some(t) => t,
+        //     None if var_type == Type::Void => {
+        //         // This error should have been caught by type checker (VoidAssignment)
+        //         return Err(CodeGenError::InvalidType(
+        //             "Cannot create variable of type void".to_string(),
+        //             span,
+        //         ));
+        //     }
+        //     None => {
+        //         // Should not happen for valid storable types
+        //         return Err(CodeGenError::InvalidType(
+        //             format!("Cannot get basic LLVM type for variable type {}", var_type),
+        //             span,
+        //         ));
+        //     }
+        // };
+        //
+        // if compiled_value.get_type() != expected_llvm_type {
+        //     // This indicates an internal error OR missing type conversion step
+        //     return Err(CodeGenError::InvalidType(
+        //         format!(
+        //             "Internal Error: RHS value type {} does not match variable type {} for '{}'",
+        //             compiled_value.get_type(),
+        //             expected_llvm_type,
+        //             name
+        //         ),
+        //         span,
+        //     ));
+        // }
         // --- End Type Check ---
 
         // Allocate based on the determined type passed in
-        let alloca = self.create_entry_block_alloca(name, var_type.clone());
+        let alloca = self.create_entry_block_alloca(name, var_type.clone(), &span);
         self.builder.build_store(alloca, compiled_value);
 
         // Store type info along with pointer

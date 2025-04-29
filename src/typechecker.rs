@@ -332,7 +332,7 @@ impl TypeChecker {
     }
 
     /// Main entry point: Check a whole program.
-    pub fn check_program(&mut self, program: &Program) -> Result<(), Vec<TypeError>> {
+    pub fn check_program(&mut self, program: &Program) -> Result<&SymbolTable, Vec<TypeError>> {
         for statement in &program.statements {
             let span = statement.span.clone();
             match &statement.kind {
@@ -362,50 +362,55 @@ impl TypeChecker {
         }
 
         if self.errors.is_empty() {
-            Ok(())
+            Ok(&self.symbol_table)
         } else {
             Err(self.errors.clone())
         }
     }
 
     // Helper to define struct type during first pass
+    // It MUST call resolve_type_node on each field's type_node
     fn define_struct_type(&mut self, name: &str, fields_ast: &[FieldDef], def_span: Span) {
         let mut field_types_resolved = Vec::new();
         let mut field_map = HashMap::new();
         let mut field_names_seen = HashMap::new();
-        let mut has_error = false; // Track if any field type failed
+        let mut has_error = false;
 
         for (index, field_def) in fields_ast.iter().enumerate() {
             if field_names_seen
                 .insert(field_def.name.clone(), field_def.span.clone())
                 .is_some()
             {
-                self.errors.push(TypeError::DuplicateFieldDefinition(
-                    name.to_string(),
-                    field_def.name.clone(),
-                    field_def.span.clone(),
-                ));
+                /* Handle duplicate */
                 has_error = true;
                 continue;
             }
-            // Resolve field type AND annotate the field_def.type_node
+
+            // --- PROBLEM AREA ---
+            // Ensure resolve_type_node is called AND its result is used.
+            // resolve_type_node internally annotates the node if successful.
             if let Some(field_type) = self.resolve_type_node(&field_def.type_node) {
+                // <<< CALL RESOLVER
                 field_types_resolved.push((field_def.name.clone(), field_type.clone()));
                 field_map.insert(field_def.name.clone(), (index, field_type));
             } else {
-                has_error = true; // Error resolving type already added
+                // Error resolving type was already added by resolve_type_node
+                has_error = true;
+                // Optionally break or just skip adding this field? Skipping for now.
             }
+            // --- END PROBLEM AREA ---
         }
 
-        // Only define struct if all fields resolved correctly
         if !has_error {
+            // Only define if all fields were valid
             let definition = StructDefinition {
                 name: name.to_string(),
-                fields: Rc::new(field_types_resolved), // Store Vec<(String, Type)>
+                fields: Rc::new(field_types_resolved),
                 field_map: Rc::new(field_map),
                 def_span: def_span.clone(),
             };
             if let Err(e) = self.symbol_table.define_struct(definition) {
+                // Handle redefinition error
                 self.errors.push(TypeError::StructRedefinition {
                     name: name.to_string(),
                     new_loc: def_span.clone(),
@@ -1427,7 +1432,11 @@ impl TypeChecker {
         // symbol_table: &SymbolTable // Pass symbol table explicitly
         // OR rely on self.symbol_table if resolve_type_node is always called on self
     ) -> Option<Type> {
-        match &node.kind {
+        // Check cache first (using RefCell borrow)
+        if let Some(ty) = node.get_type() {
+            return Some(ty);
+        }
+        let resolved =  match &node.kind {
             TypeNodeKind::Simple(name) => {
                 match name.as_str() {
                     // Primitives
@@ -1459,7 +1468,12 @@ impl TypeChecker {
                 self.resolve_type_node(element_node)
                     .map(|t| Type::Vector(Box::new(t)))
             }
+        };
+        // *** Crucial: Annotate the node itself ***
+        if let Some(ty) = resolved.clone() {
+            node.set_type(ty); // <<< THIS LINE ANNOTATES THE AST NODE
         }
+        resolved // Return the resolved type (or None if error)
     }
 
     // Helper to check blocks used inside statements like IfStmt, WhileStmt, ForStmt
