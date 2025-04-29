@@ -1,13 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use crate::ast::{
+        def, defs, BinaryOperator, Expression, ExpressionKind, Program, StatementKind, TypeNode,
+        TypeNodeKind,
+    };
     use crate::codegen::*;
-    use crate::ast::{def, defs, BinaryOperator, Expression, ExpressionKind, Program, StatementKind, TypeNode, TypeNodeKind};
-    use inkwell::context::Context;
-    use std::path::Path;
-    use inkwell::values::AnyValue;
     use crate::typechecker::TypeChecker;
     use crate::types::Type;
+    use inkwell::context::Context;
+    use inkwell::values::AnyValue;
+    use std::cell::RefCell;
+    use std::path::Path;
 
     #[test]
 
@@ -115,14 +118,20 @@ mod tests {
 
         // Create a simple function: function add(a: Int, b: Int) -> Int { a + b }
         let params = vec![
-            ("a".to_string(), Some(TypeNode{
-                kind: TypeNodeKind::Simple("int".to_string()),
-                span: Default::default(),
-            })),
-            ("b".to_string(), Some(TypeNode{
-                kind: TypeNodeKind::Simple("int".to_string()),
-                span: Default::default(),
-            })),
+            (
+                "a".to_string(),
+                Some(TypeNode::new(
+                    TypeNodeKind::Simple("int".to_string()),
+                    Default::default(),
+                )),
+            ),
+            (
+                "b".to_string(),
+                Some(TypeNode::new(
+                    TypeNodeKind::Simple("int".to_string()),
+                    Default::default(),
+                )),
+            ),
         ];
 
         let body = Program {
@@ -144,10 +153,10 @@ mod tests {
         let func_def = StatementKind::FunctionDef {
             name: "add".to_string(),
             params,
-            return_type_ann: Some(TypeNode {
-                kind: TypeNodeKind::Simple("int".to_string()),
-                span: Default::default(),
-            }),
+            return_type_ann: Some(TypeNode::new(
+                TypeNodeKind::Simple("int".to_string()),
+                Default::default(),
+            )),
             body,
         };
         let programm = Program {
@@ -197,10 +206,10 @@ mod tests {
         let func_def = StatementKind::FunctionDef {
             name: "returns_int".to_string(),
             params: vec![],
-            return_type_ann: Some(TypeNode {
-                kind: TypeNodeKind::Simple("int".to_string()),
-                span: Default::default(),
-            }),
+            return_type_ann: Some(TypeNode::new(
+                TypeNodeKind::Simple("int".to_string()),
+                Default::default(),
+            )),
             body,
         };
 
@@ -231,10 +240,10 @@ mod tests {
         let func_def = defs(StatementKind::FunctionDef {
             name: "returns_float".to_string(),
             params: vec![],
-            return_type_ann: Some(TypeNode {
-                kind: TypeNodeKind::Simple("float".to_string()),
-                span: Default::default(),
-            }),
+            return_type_ann: Some(TypeNode::new(
+                TypeNodeKind::Simple("float".to_string()),
+                Default::default(),
+            )),
             body,
         });
 
@@ -265,10 +274,10 @@ mod tests {
         let func_def = defs(StatementKind::FunctionDef {
             name: "returns_bool".to_string(),
             params: vec![],
-            return_type_ann: Some(TypeNode {
-                kind: TypeNodeKind::Simple("bool".to_string()),
-                span: Default::default(),
-            }),
+            return_type_ann: Some(TypeNode::new(
+                TypeNodeKind::Simple("bool".to_string()),
+                Default::default(),
+            )),
             body,
         });
 
@@ -297,10 +306,10 @@ mod tests {
         let func_def = defs(StatementKind::FunctionDef {
             name: "returns_void".to_string(),
             params: vec![],
-            return_type_ann: Some(TypeNode {
-                kind: TypeNodeKind::Simple("void".to_string()),
-                span: Default::default(),
-            }),
+            return_type_ann: Some(TypeNode::new(
+                TypeNodeKind::Simple("void".to_string()),
+                Default::default(),
+            )),
             body,
         });
 
@@ -336,10 +345,10 @@ mod tests {
         let func_def = defs(StatementKind::FunctionDef {
             name: "implicit_void".to_string(),
             params: vec![],
-            return_type_ann: Some(TypeNode {
-                kind: TypeNodeKind::Simple("void".to_string()),
-                span: Default::default(),
-            }),
+            return_type_ann: Some(TypeNode::new(
+                TypeNodeKind::Simple("void".to_string()),
+                Default::default(),
+            )),
             body,
         });
 

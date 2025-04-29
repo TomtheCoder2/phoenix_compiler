@@ -132,6 +132,7 @@ impl<'a> Lexer<'a> {
             Some('{') => TokenKind::LBrace,
             Some('}') => TokenKind::RBrace,
             Some(':') => TokenKind::Colon,
+            Some('.') => TokenKind::Dot,
 
             // Two-char TokenKinds (check peek_char)
             Some('=') => {
@@ -205,6 +206,7 @@ impl<'a> Lexer<'a> {
                     "while" => TokenKind::While,
                     "for" => TokenKind::For,
                     "return" => TokenKind::Return,
+                    "struct" => TokenKind::Struct,
                     _ => TokenKind::Identifier(ident), // Default to identifier
                 };
                 // Location should span the identifier
@@ -764,6 +766,29 @@ mod tests {
             TokenKind::Or,
             TokenKind::Bang,
             TokenKind::BoolLiteral(true),
+        ];
+        for expected in tokens {
+            assert_eq!(l.next_token().kind, expected);
+        }
+    }
+    
+    // struct
+    #[test]
+    fn test_struct() {
+        let input = "struct Point { x: int, y: int }";
+        let mut l = Lexer::new("test.txt".to_string(), input);
+        let tokens = vec![
+            TokenKind::Struct,
+            TokenKind::Identifier("Point".to_string()),
+            TokenKind::LBrace,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Colon,
+            TokenKind::Identifier("int".to_string()),
+            TokenKind::Comma,
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Colon,
+            TokenKind::Identifier("int".to_string()),
+            TokenKind::RBrace,
         ];
         for expected in tokens {
             assert_eq!(l.next_token().kind, expected);

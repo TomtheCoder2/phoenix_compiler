@@ -1,13 +1,15 @@
 // src/typechecker.rs
 
 use crate::ast::{
-    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program,
-    Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
+    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, FieldDef, LogicalOperator,
+    Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
 };
 use crate::location::{Location, Span};
 use crate::symbol_table::{FunctionSignature, SymbolInfo, SymbolTable};
 use crate::types::Type;
+use std::collections::HashMap;
 use std::fmt;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeError {
@@ -75,6 +77,23 @@ pub enum TypeError {
         span: Span,
     }, // Wrong type pushed
     AssignIndexTargetNotVector(Type, Span), // Target of index assign isn't vector
+    UnknownStruct(String, Span), // Struct name not defined
+    DuplicateFieldDefinition(String, String, Span), // Field defined twice in struct
+    DuplicateFieldInitializer(String, String, Span), // Field initialized twice in literal
+    MissingFieldInitializer(String, String, Span), // Field missing in literal
+    ExtraFieldInitializer(String, String, Span), // Field provided in literal not in struct def
+    FieldTypeMismatch {
+        struct_name: String,
+        field_name: String,
+        expected: Type,
+        found: Type,
+        span: Span,
+    },
+    StructRedefinition {
+        name: String,
+        new_loc: Span,
+        prev_loc: Span,
+    },
 }
 // src/typechecker.rs
 impl fmt::Display for TypeError {
@@ -222,34 +241,72 @@ impl fmt::Display for TypeError {
             TypeError::AssignIndexTargetNotVector(ty, span) => {
                 write!(f, "{} Cannot index into type {}", span, ty)
             }
+            TypeError::UnknownStruct(name, span) => {
+                write!(f, "{} Unknown struct type '{}'", span, name)
+            }
+            TypeError::DuplicateFieldDefinition(name, field_name, span) => {
+                write!(
+                    f,
+                    "{} Duplicate field definition '{}' in struct '{}'",
+                    span, field_name, name
+                )
+            }
+            TypeError::DuplicateFieldInitializer(name, field_name, span) => {
+                write!(
+                    f,
+                    "{} Duplicate field initializer '{}' in struct literal '{}'",
+                    span, field_name, name
+                )
+            }
+            TypeError::MissingFieldInitializer(name, field_name, span) => {
+                write!(
+                    f,
+                    "{} Missing field initializer '{}' in struct literal '{}'",
+                    span, field_name, name
+                )
+            }
+            TypeError::ExtraFieldInitializer(name, field_name, span) => {
+                write!(
+                    f,
+                    "{} Extra field initializer '{}' in struct literal '{}'",
+                    span, field_name, name
+                )
+            }
+            TypeError::FieldTypeMismatch {
+                struct_name,
+                field_name,
+                expected,
+                found,
+                span,
+            } => {
+                write!(
+                    f,
+                    "{} Field '{}' in struct '{}' has type mismatch: expected {}, found {}",
+                    span, field_name, struct_name, expected, found
+                )
+            }
+            TypeError::StructRedefinition {
+                name,
+                new_loc,
+                prev_loc,
+            } => {
+                write!(
+                    f,
+                    "{} Struct '{}' redefined in this scope, first definition at {}",
+                    new_loc, name, prev_loc
+                )
+            }
         }
     }
 }
 
-// Helper to resolve Type AST to internal Type enum
-fn resolve_type_node(node: &TypeNode, errors: &mut Vec<TypeError>) -> Option<Type> {
-    match &node.kind {
-        TypeNodeKind::Simple(name) => {
-            match name.as_str() {
-                "int" => Some(Type::Int),
-                "float" => Some(Type::Float),
-                "bool" => Some(Type::Bool),
-                "string" => Some(Type::String), // Handle string type name
-                "void" => Some(Type::Void),
-                _ => {
-                    errors.push(TypeError::UnknownTypeName(
-                        name.clone(),
-                        node.span.start.clone(),
-                    ));
-                    None
-                }
-            }
-        }
-        TypeNodeKind::Vector(element_node) => {
-            // Recursively resolve element type
-            resolve_type_node(element_node, errors).map(|t| Type::Vector(Box::new(t)))
-        }
-    }
+// --- Symbol Table --- Store struct field info
+#[derive(Debug, Clone)]
+pub struct StructDefinition {
+    pub name: String,
+    pub fields: Rc<Vec<(String, Type)>>, // Stores resolved Type now
+    pub field_map: Rc<HashMap<String, (usize, Type)>>,
+    pub def_span: Span,
 }
 
 pub struct TypeChecker {
@@ -278,40 +335,24 @@ impl TypeChecker {
     pub fn check_program(&mut self, program: &Program) -> Result<(), Vec<TypeError>> {
         for statement in &program.statements {
             let span = statement.span.clone();
-            if let StatementKind::FunctionDef {
-                name,
-                params,
-                return_type_ann,
-                ..
-            } = &statement.kind
-            {
-                // type resolution
-                let param_types: Vec<Type> = params
-                    .iter()
-                    .map(|(_, opt_node)| {
-                        opt_node
-                            .as_ref()
-                            .and_then(|n| resolve_type_node(n, &mut self.errors))
-                    })
-                    .collect::<Option<Vec<Type>>>() // Collects Option<Type>, fails if any param type is None
-                    .unwrap_or_else(|| vec![]); // Default empty vector if resolution failed
-                let return_type = return_type_ann
-                    .as_ref()
-                    .and_then(|n| resolve_type_node(n, &mut self.errors))
-                    .unwrap_or(Type::Void); // Default to Void if resolution failed
-                let signature = FunctionSignature {
-                    param_types,
-                    return_type,
-                    def_span: span.clone(),
-                };
-                if let Err(e) = self.symbol_table.define_function(name, signature) {
-                    // e holds the span where the function was defined
-                    self.errors.push(TypeError::FunctionRedefinition {
-                        name: name.clone(),
-                        new_loc: span,
-                        prev_loc: e,
-                    });
+            match &statement.kind {
+                StatementKind::StructDef { name, fields } => {
+                    self.define_struct_type(name, fields, statement.span.clone());
                 }
+                StatementKind::FunctionDef {
+                    name,
+                    params,
+                    return_type_ann,
+                    ..
+                } => {
+                    self.define_function_signature(
+                        name,
+                        params,
+                        return_type_ann,
+                        statement.span.clone(),
+                    );
+                }
+                _ => {} // Ignore other statements in first pass
             }
         }
 
@@ -325,6 +366,89 @@ impl TypeChecker {
         } else {
             Err(self.errors.clone())
         }
+    }
+
+    // Helper to define struct type during first pass
+    fn define_struct_type(&mut self, name: &str, fields_ast: &[FieldDef], def_span: Span) {
+        let mut field_types_resolved = Vec::new();
+        let mut field_map = HashMap::new();
+        let mut field_names_seen = HashMap::new();
+        let mut has_error = false; // Track if any field type failed
+
+        for (index, field_def) in fields_ast.iter().enumerate() {
+            if field_names_seen
+                .insert(field_def.name.clone(), field_def.span.clone())
+                .is_some()
+            {
+                self.errors.push(TypeError::DuplicateFieldDefinition(
+                    name.to_string(),
+                    field_def.name.clone(),
+                    field_def.span.clone(),
+                ));
+                has_error = true;
+                continue;
+            }
+            // Resolve field type AND annotate the field_def.type_node
+            if let Some(field_type) = self.resolve_type_node(&field_def.type_node) {
+                field_types_resolved.push((field_def.name.clone(), field_type.clone()));
+                field_map.insert(field_def.name.clone(), (index, field_type));
+            } else {
+                has_error = true; // Error resolving type already added
+            }
+        }
+
+        // Only define struct if all fields resolved correctly
+        if !has_error {
+            let definition = StructDefinition {
+                name: name.to_string(),
+                fields: Rc::new(field_types_resolved), // Store Vec<(String, Type)>
+                field_map: Rc::new(field_map),
+                def_span: def_span.clone(),
+            };
+            if let Err(e) = self.symbol_table.define_struct(definition) {
+                self.errors.push(TypeError::StructRedefinition {
+                    name: name.to_string(),
+                    new_loc: def_span.clone(),
+                    prev_loc: e,
+                });
+            }
+        }
+    }
+
+    // Helper to define function signature during first pass
+    fn define_function_signature(
+        &mut self,
+        name: &str,
+        params_ast: &[(String, Option<TypeNode>)],
+        ret_ann_node: &Option<TypeNode>,
+        def_span: Span,
+    ) {
+        // Resolve param/return types (only if successful)
+        let param_types_opt: Option<Vec<Type>> = params_ast
+            .iter()
+            .map(|(_, opt_node)| opt_node.as_ref().and_then(|n| self.resolve_type_node(n)))
+            .collect();
+        let ret_type_opt: Option<Type> = ret_ann_node
+            .as_ref()
+            .and_then(|n| self.resolve_type_node(n));
+
+        if let (Some(param_types), Some(return_type)) =
+            (param_types_opt, ret_type_opt.or(Some(Type::Void)))
+        {
+            let signature = FunctionSignature {
+                param_types,
+                return_type,
+                def_span: def_span.clone(),
+            };
+            if let Err(e) = self.symbol_table.define_function(name, signature) {
+                self.errors.push(TypeError::FunctionRedefinition {
+                    name: name.to_string(),
+                    new_loc: def_span.clone(),
+                    prev_loc: e,
+                });
+            }
+        }
+        // Else: type resolution error already recorded by resolve_type_node
     }
 
     /// Check a single statement.
@@ -423,6 +547,7 @@ impl TypeChecker {
                 let _ = self.check_program_block(body);
                 self.symbol_table.exit_scope();
             }
+            StatementKind::StructDef { .. } => {} // Already handled in pass 1
             StatementKind::FunctionDef {
                 name,
                 params,
@@ -443,15 +568,11 @@ impl TypeChecker {
                 // Resolve param/return types from TypeNodes
                 let param_types_result: Option<Vec<Type>> = params
                     .iter()
-                    .map(|(_, opt_node)| {
-                        opt_node
-                            .as_ref()
-                            .and_then(|n| resolve_type_node(n, &mut self.errors))
-                    })
+                    .map(|(_, opt_node)| opt_node.as_ref().and_then(|n| self.resolve_type_node(n)))
                     .collect(); // Collects Option<Type>, fails if any param type is None
                 let return_type_result: Option<Type> = return_type_ann
                     .as_ref()
-                    .and_then(|n| resolve_type_node(n, &mut self.errors));
+                    .and_then(|n| self.resolve_type_node(n));
 
                 // Define parameters in the new scope
                 for (i, (p_name, _)) in params.iter().enumerate() {
@@ -948,6 +1069,84 @@ impl TypeChecker {
                     }
                 }
             }
+            ExpressionKind::StructLiteral {
+                struct_name,
+                fields,
+            } => {
+                // 1. Look up struct definition
+                let Some(struct_def) = self.symbol_table.lookup_struct(struct_name).cloned() else {
+                    // Clone def for use
+                    self.errors
+                        .push(TypeError::UnknownStruct(struct_name.clone(), span));
+                    return None;
+                };
+
+                // 2. Check provided fields against definition
+                let mut provided_fields = HashMap::new();
+                let mut missing_fields = Vec::new();
+                let mut type_mismatch = false;
+
+                // Check provided fields for duplicates and type match
+                for init_field in fields {
+                    if provided_fields
+                        .insert(init_field.name.clone(), init_field.span.clone())
+                        .is_some()
+                    {
+                        self.errors.push(TypeError::DuplicateFieldInitializer(
+                            struct_name.clone(),
+                            init_field.name.clone(),
+                            init_field.span.clone(),
+                        ));
+                        // Continue checking other fields
+                    }
+                    // Check if field exists in definition and type matches
+                    match struct_def.field_map.get(&init_field.name) {
+                        Some((_idx, expected_field_type)) => {
+                            if let Some(value_type) = self.check_expression(
+                                &init_field.value,
+                                Some(expected_field_type.clone()),
+                            ) {
+                                // check_expression handles mismatch if expected type provided
+                                // Redundant check: if value_type != *expected_field_type { ... }
+                            } else {
+                                type_mismatch = true; // Error checking value
+                            }
+                        }
+                        None => {
+                            self.errors.push(TypeError::ExtraFieldInitializer(
+                                struct_name.clone(),
+                                init_field.name.clone(),
+                                init_field.span.clone(),
+                            ));
+                        }
+                    }
+                }
+
+                // Check for missing fields
+                for (def_field_name, _) in struct_def.fields.iter() {
+                    if !provided_fields.contains_key(def_field_name) {
+                        missing_fields.push(def_field_name.clone());
+                    }
+                }
+                if !missing_fields.is_empty() {
+                    self.errors.push(TypeError::MissingFieldInitializer(
+                        struct_name.clone(),
+                        missing_fields.join(", "),
+                        span,
+                    ));
+                }
+
+                // Result type is the struct type if no errors found
+                if !type_mismatch && missing_fields.is_empty()
+                /* && no extra/duplicate errors? */
+                {
+                    Some(Type::Struct {
+                        name: Rc::from(struct_name.clone()),
+                    })
+                } else {
+                    None
+                }
+            } // End StructLiteral
             ExpressionKind::IfExpr {
                 condition,
                 then_branch,
@@ -1207,7 +1406,9 @@ impl TypeChecker {
         match &expr.kind {
             ExpressionKind::Variable(name) => {
                 // Base case: check the variable itself
-                self.symbol_table.lookup_variable(name).map_or(false, |info| info.is_mutable)
+                self.symbol_table
+                    .lookup_variable(name)
+                    .map_or(false, |info| info.is_mutable)
                 // If lookup fails, UndefinedVariable error handled elsewhere, return false here
             }
             ExpressionKind::IndexAccess { target, .. } => {
@@ -1219,26 +1420,42 @@ impl TypeChecker {
         }
     }
 
-    // Helper to resolve TypeNode - needs self now to push errors
-    fn resolve_type_node(&mut self, node: &TypeNode) -> Option<Type> {
+    // Now takes symbol table to look up struct names
+    fn resolve_type_node(
+        &mut self, // Keep &mut self to push errors
+        node: &TypeNode,
+        // symbol_table: &SymbolTable // Pass symbol table explicitly
+        // OR rely on self.symbol_table if resolve_type_node is always called on self
+    ) -> Option<Type> {
         match &node.kind {
-            TypeNodeKind::Simple(name) => match name.as_str() {
-                "int" => Some(Type::Int),
-                "float" => Some(Type::Float),
-                "bool" => Some(Type::Bool),
-                "string" => Some(Type::String), // Handle string type name
-                "void" => Some(Type::Void),
-                // Add more types as needed
-                _ => {
-                    self.errors.push(TypeError::UnknownTypeName(
-                        name.clone(),
-                        node.span.start.clone(),
-                    ));
-                    None
+            TypeNodeKind::Simple(name) => {
+                match name.as_str() {
+                    // Primitives
+                    "int" => Some(Type::Int),
+                    "float" => Some(Type::Float),
+                    "bool" => Some(Type::Bool),
+                    "string" => Some(Type::String),
+                    "void" => Some(Type::Void),
+                    // Check for defined struct name
+                    _ => {
+                        if self.symbol_table.lookup_struct(name).is_some() {
+                            // Found a struct with this name
+                            Some(Type::Struct {
+                                name: Rc::from(name.clone()),
+                            })
+                        } else {
+                            // Not a primitive, not a known struct
+                            self.errors.push(TypeError::UnknownTypeName(
+                                name.clone(),
+                                node.span.start.clone(),
+                            ));
+                            None
+                        }
+                    }
                 }
-            },
+            }
             TypeNodeKind::Vector(element_node) => {
-                // Recursively resolve element type
+                // Recursively resolve element type, passing symbol table down implicitly via self
                 self.resolve_type_node(element_node)
                     .map(|t| Type::Vector(Box::new(t)))
             }

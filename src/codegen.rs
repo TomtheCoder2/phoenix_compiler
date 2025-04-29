@@ -1,11 +1,12 @@
 // src/codegen.rs
 
+// Added BasicValueEnum
+use crate::ast;
 use crate::ast::{
     type_node_to_type, BinaryOperator, ComparisonOperator, Expression, ExpressionKind,
     LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
 };
-use crate::location::Span;
-// Added BasicValueEnum
+use crate::location::{Location, Span};
 use crate::types::Type;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -14,7 +15,7 @@ use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
 };
-use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType};
+use inkwell::types::{AnyType, BasicMetadataTypeEnum, BasicType, StructType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValue};
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
@@ -61,6 +62,8 @@ pub enum CodeGenError {
     AssignmentToImmutable(String, Span),
     PrintStrArgError(String, Span),
     InvalidAssignmentTarget(String, Span),
+    StructRedefinition(String, Span),
+    UnknownTypeName(String, Location),
 }
 impl fmt::Display for CodeGenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -128,6 +131,12 @@ impl fmt::Display for CodeGenError {
                     span, msg
                 )
             }
+            CodeGenError::StructRedefinition(name, span) => {
+                write!(f, "{}: Codegen Error: Struct '{}' redefined (why didnt the typechecker catch this?)", span, name)
+            }
+            CodeGenError::UnknownTypeName(name, loc) => {
+                write!(f, "{}: Codegen Error: Unknown type name '{}'", loc, name)
+            }
         }
     }
 }
@@ -154,6 +163,7 @@ pub struct Compiler<'a, 'ctx> {
     // Function map stores signature (params + return) along with FunctionValue
     // Using our Type enum for the signature representation.
     pub(crate) functions: HashMap<String, (Vec<Type>, Type, FunctionValue<'ctx>)>,
+    llvm_struct_types: HashMap<String, StructType<'ctx>>,
     current_function_return_type: Option<Type>, // Track expected return type
     fpm: PassManager<FunctionValue<'ctx>>,
     // Keep print wrapper stuff
@@ -215,6 +225,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             module,
             variables: HashMap::new(),
             functions: HashMap::new(),
+            llvm_struct_types: HashMap::new(),
             fpm,                                // Store the initialized FPM
             current_function_return_type: None, // Initialize
             current_function: None,
@@ -259,6 +270,24 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         self.str_concat_func = None;
         self.str_get_char_ptr_func = None;
         self.current_function = None; // Reset current function
+        self.llvm_struct_types.clear();
+
+        // --- Pass 1: Define LLVM Struct Types (and declare funcs) ---
+        // Iterate AST, find StructDefs and FunctionDefs
+        for stmt in &program.statements {
+            match &stmt.kind {
+                StatementKind::StructDef { name, fields } => {
+                    // We need the resolved field types *now*. Type Checker should have annotated them.
+                    self.define_llvm_struct_type(name, fields,stmt.span.clone())?;
+                }
+                StatementKind::FunctionDef { name, params, return_type_ann, .. } => {
+                    // Declare function signature using resolved types from AST nodes
+                    self.declare_llvm_function(name, params, return_type_ann,stmt.span.clone())?;
+                }
+                _ => {}
+            }
+        }
+        // --- Pass 2: Compile Statement/Function Bodies ---
 
         // --- Declare Printf Early ---
         // Ensure printf is declared before compiling user code that might need it (though not used directly by user code yet)
@@ -344,6 +373,66 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         }
 
         Ok(()) // Module is ready
+    }
+
+    // Update helper to get resolved types from AST nodes
+    fn define_llvm_struct_type(&mut self, name: &str, fields_ast: &[ast::FieldDef], span: Span) -> Result<(), CodeGenError> {
+        if self.llvm_struct_types.contains_key(name) { 
+            return Err(CodeGenError::StructRedefinition(name.to_string(), span));
+        }
+
+        let mut field_llvm_types = Vec::new();
+        for field_def in fields_ast {
+            // --- Get resolved type from AST node's annotation ---
+            let toy_type = field_def.type_node.get_type() // Use the annotated type
+                .ok_or_else(|| CodeGenError::InvalidAstNode(format!(
+                    "Codegen: Type annotation for field '{}' in struct '{}' was not resolved by type checker",
+                    field_def.name, name), span.clone()))?;
+            // --- End Get resolved type ---
+
+            let llvm_basic_type = toy_type.to_llvm_basic_type(self.context) // Use resolved type
+                .ok_or_else(|| 
+                    CodeGenError::InvalidAstNode(format!(
+                        "Codegen: Type annotation for field '{}' in struct '{}' is not a basic type",
+                        field_def.name, name), span.clone()))?;
+            field_llvm_types.push(llvm_basic_type);
+        }
+
+        // Create named struct type directly
+        let struct_type = self.context.struct_type(&field_llvm_types, false);
+        self.llvm_struct_types.insert(name.to_string(), struct_type);
+        Ok(())
+    }
+
+
+    // Update helper to get resolved types from AST nodes
+    fn declare_llvm_function(&mut self, name: &str, params_ast: &[(String, Option<ast::TypeNode>)], ret_ann_node: &Option<ast::TypeNode>, span: Span) -> Result<(), CodeGenError> {
+        if self.functions.contains_key(name) { return Ok(()); }
+
+        // Get resolved types from TypeNodes on AST
+        let param_types_res: Result<Vec<Type>, CodeGenError> = params_ast.iter()
+            .map(|(_, opt_node)| {
+                opt_node.as_ref()
+                    .and_then(|n| n.get_type()) // Get resolved type from node
+                    .ok_or_else(|| CodeGenError::InvalidAstNode(format!("Param type not resolved for func '{}'", name), span.clone()))
+            })
+            .collect();
+        let param_types = param_types_res?;
+
+        let return_type = ret_ann_node.as_ref()
+            .and_then(|n| n.get_type()) // Get resolved type from node
+            .unwrap_or(Type::Void); // Default Void if no annotation (TC should ensure this is ok)
+
+
+        // let llvm_param_types: Vec<_> = param_types.iter()
+        //     .map(|t| t.to_llvm_basic_type(self.context).unwrap().into()) // Assume basic for now
+        //     .collect();
+        let llvm_return_type = return_type.to_llvm_any_type(self.context, &self.llvm_struct_types);
+        let fn_type = llvm_return_type.into_function_type();
+
+        let function = self.module.add_function(name, fn_type, None);
+        self.functions.insert(name.to_string(), (param_types, return_type, function));
+        Ok(())
     }
 
     // Helper to get the type of an expression - NEEDS TYPE CHECKING PHASE ideally
@@ -633,6 +722,105 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 // 4. Expression evaluates to the string handle (i8*)
                 Ok(str_handle.into())
             }
+
+            // --- Struct Literal ---
+            ExpressionKind::StructLiteral {
+                struct_name,
+                fields,
+            } => {
+                // 1. Get the LLVM struct type definition
+                let struct_llvm_type = self
+                    .llvm_struct_types
+                    .get(struct_name)
+                    .ok_or_else(|| {
+                        CodeGenError::InvalidAstNode(
+                            format!(
+                                "Struct type '{}' not found in LLVM definitions",
+                                struct_name
+                            ),
+                            span.clone(),
+                        )
+                    })?
+                    .clone(); // Should be impossible if TC passed
+
+                // 2. Compile field initializer expressions
+                // Need to match order with struct definition! Type checker ensures presence/absence/names.
+                // Retrieve field order from stored definition (requires access to TC info or struct def map)
+                // HACK: Assume fields in literal are in correct order for now. TC should verify order?
+                let mut field_values = Vec::with_capacity(fields.len());
+                for init_field in fields {
+                    let value = self.compile_expression(&init_field.value)?;
+                    // TODO: Check value type matches expected field type from struct def
+                    field_values.push(value);
+                }
+
+                // 3. Create LLVM struct value
+                // Can we create const_struct if all fields are const? Harder check.
+                // Build it on the stack using insertvalue for now? Or directly?
+                // Let's try building the struct value directly if possible.
+                // Need BasicValueEnum, not mixed types.
+                let field_basic_values: Vec<BasicValueEnum<'ctx>> =
+                    field_values.into_iter().collect();
+
+                // Create the struct value
+                let struct_value = struct_llvm_type.const_named_struct(&field_basic_values);
+                // const_named_struct might only work for constants?
+                // If not all const, need to `alloca` struct, then `gep` + `store` each field.
+
+                // --- Let's use Alloca + GEP + Store (more general) ---
+                // a. Allocate stack space for the struct
+                let struct_alloca = match self.builder.build_alloca(struct_llvm_type, struct_name) {
+                    Ok(alloca) => alloca,
+                    Err(e) => {
+                        return Err(CodeGenError::LlvmError(
+                            format!("Struct alloca failed: {}", e),
+                            span.clone(),
+                        ))
+                    }
+                };
+
+                // b. Store each compiled field value into the allocation
+                for (index, init_field) in fields.iter().enumerate() {
+                    // Assumes literal order matches def order!
+                    let field_value = self.compile_expression(&init_field.value)?;
+                    // GEP to get pointer to field index
+                    let field_ptr = self
+                        .builder
+                        .build_struct_gep(
+                            struct_llvm_type,
+                            struct_alloca,
+                            index as u32,
+                            &format!("{}.{}", struct_name, init_field.name),
+                        )
+                        .map_err(|e| {
+                            CodeGenError::LlvmError(
+                                format!("Struct GEP failed: {}", e),
+                                span.clone(),
+                            )
+                        })?;
+                    // Store value
+                    self.builder.build_store(field_ptr, field_value);
+                }
+
+                // c. How to return the struct value?
+                // If treated like basic types, need to LOAD from alloca.
+                // If passed by reference, return the alloca pointer?
+                // Let's assume we return the value (load from stack) for now.
+                let loaded_struct =
+                    match self
+                        .builder
+                        .build_load(struct_llvm_type, struct_alloca, "load_struct")
+                    {
+                        Ok(loaded) => loaded,
+                        Err(e) => {
+                            return Err(CodeGenError::LlvmError(
+                                format!("Struct load failed: {}", e),
+                                span.clone(),
+                            ))
+                        }
+                    };
+                Ok(loaded_struct) // Return StructValue wrapped in BasicValueEnum
+            } // End StructLiteral
 
             // Arithmetic Operations (Example: requires operands to be the same type for now)
             ExpressionKind::BinaryOp { op, left, right } => {
@@ -2030,6 +2218,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             Type::String => Some(pointer_size),
             Type::Vector(_) => Some(pointer_size), // <<< Size of the handle/pointer
             Type::Void => Some(0),
+            Type::Struct { .. } => Some(pointer_size),
         }
     }
 
@@ -2047,6 +2236,11 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             } => {
                 // Call helper with the determined type
                 self.compile_var_let_stmt(name, value, false, span, type_ann)
+            }
+
+            StatementKind::StructDef { .. } => {
+                // Handled in first pass of compile_program_to_module
+                Ok((None, false))
             }
 
             StatementKind::VarBinding {
@@ -2303,178 +2497,191 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
                 return_type_ann,
                 body,
             } => {
-                if self.functions.contains_key(name) {
-                    // Function already defined
-                    return Err(CodeGenError::FunctionRedefinition(name.clone(), span));
-                }
+                // Signature/LLVM Function created in first pass. Compile body now.
+                if let Some((_, _, function)) = self.functions.get(name) {
+                    // let current_func_backup = self.current_function;
+                    // let current_ret_type_backup = self.current_function_return_type;
+                    // let vars_backup = self.variables.clone();
 
-                // --- Determine Param and Return Types ---
-                // Use annotations, default to float for now if missing (NEEDS TYPE CHECKING)
-                // --- Determine Param and Return Types ---
-                let toy_param_types: Vec<Type> = params
-                    .iter()
-                    .map(|param| {
-                        // param.type_ann is Option<Type>
-                        // convert type_ann: TypeNode to Type with type_node_to_type
-                        match &param.1 {
-                            Some(type_node) => Some(type_node_to_type(type_node)),
-                            None => None, // Default to Float if no type annotation
-                        }
-                        .unwrap_or(Type::Void)
-                    })
-                    .collect();
-                // convert type_ann: TypeNode to Type with type_node_to_type
-                let type_ann = match return_type_ann {
-                    Some(type_node) => Some(type_node_to_type(type_node)),
-                    None => None, // Default to Float if no type annotation
-                };
-                let toy_return_type = type_ann.unwrap_or(Type::Void); // Default Float (improve later)
-
-                let llvm_param_types: Result<Vec<BasicMetadataTypeEnum>, CodeGenError> =
-                    toy_param_types
+                    // --- Determine Param and Return Types ---
+                    // Use annotations, default to float for now if missing (NEEDS TYPE CHECKING)
+                    // --- Determine Param and Return Types ---
+                    let toy_param_types: Vec<Type> = params
                         .iter()
-                        .map(|ty| match ty.to_llvm_basic_type(self.context) {
-                            Some(llvm_type) => Ok(llvm_type.into()),
-                            None => Err(CodeGenError::InvalidType(
-                                "Unsupported parameter type".to_string(),
-                                span.clone(),
-                            )),
+                        .map(|param| {
+                            // param.type_ann is Option<Type>
+                            // convert type_ann: TypeNode to Type with type_node_to_type
+                            match &param.1 {
+                                Some(type_node) => Some(type_node_to_type(type_node)),
+                                None => None, // Default to Float if no type annotation
+                            }
+                            .unwrap_or(Type::Void)
                         })
-                        .collect(); // Collects into Result<Vec<_>, _>
+                        .collect();
+                    // convert type_ann: TypeNode to Type with type_node_to_type
+                    let type_ann = match return_type_ann {
+                        Some(type_node) => Some(type_node_to_type(type_node)),
+                        None => None, // Default to Float if no type annotation
+                    };
+                    let toy_return_type = type_ann.unwrap_or(Type::Void); // Default Float (improve later)
 
-                let llvm_param_types = llvm_param_types?; // Propagate error if any
-                let fn_type = match toy_return_type {
-                    Type::Float => self.context.f64_type().fn_type(&llvm_param_types, false),
-                    Type::Int => self.context.i64_type().fn_type(&llvm_param_types, false),
-                    Type::Bool => self.context.bool_type().fn_type(&llvm_param_types, false),
-                    Type::Void => self.context.void_type().fn_type(&llvm_param_types, false),
-                    Type::String => {
-                        // String is represented as a pointer (i8*)
-                        self.context
-                            .i8_type()
-                            .ptr_type(AddressSpace::default())
-                            .fn_type(&llvm_param_types, false)
-                    } // Add other types like Pointer, Array, Struct later if needed
-                    Type::Vector(_) => {
-                        // Vector is represented as a pointer (i8*)
-                        self.context
-                            .ptr_type(AddressSpace::default())
-                            .fn_type(&llvm_param_types, false)
-                    }
-                };
+                    let llvm_param_types: Result<Vec<BasicMetadataTypeEnum>, CodeGenError> =
+                        toy_param_types
+                            .iter()
+                            .map(|ty| match ty.to_llvm_basic_type(self.context) {
+                                Some(llvm_type) => Ok(llvm_type.into()),
+                                None => Err(CodeGenError::InvalidType(
+                                    "Unsupported parameter type".to_string(),
+                                    span.clone(),
+                                )),
+                            })
+                            .collect(); // Collects into Result<Vec<_>, _>
 
-                let function = self.module.add_function(name, fn_type, None);
-                // Store signature with FunctionValue
-                self.functions.insert(
-                    name.clone(),
-                    (toy_param_types.clone(), toy_return_type.clone(), function),
-                );
+                    let llvm_param_types = llvm_param_types?; // Propagate error if any
+                    let fn_type = match toy_return_type {
+                        Type::Float => self.context.f64_type().fn_type(&llvm_param_types, false),
+                        Type::Int => self.context.i64_type().fn_type(&llvm_param_types, false),
+                        Type::Bool => self.context.bool_type().fn_type(&llvm_param_types, false),
+                        Type::Void => self.context.void_type().fn_type(&llvm_param_types, false),
+                        Type::String => {
+                            // String is represented as a pointer (i8*)
+                            self.context
+                                .i8_type()
+                                .ptr_type(AddressSpace::default())
+                                .fn_type(&llvm_param_types, false)
+                        } // Add other types like Pointer, Array, Struct later if needed
+                        Type::Vector(_) => {
+                            // Vector is represented as a pointer (i8*)
+                            self.context
+                                .ptr_type(AddressSpace::default())
+                                .fn_type(&llvm_param_types, false)
+                        }
+                        Type::Struct { .. } => {
+                            // Struct is represented as a pointer (i8*)
+                            self.context
+                                .ptr_type(AddressSpace::default())
+                                .fn_type(&llvm_param_types, false)
+                        }
+                    };
 
-                // --- Setup Function Body Context ---
-                let entry_block = self.context.append_basic_block(function, "entry");
-                let original_builder_pos = self.builder.get_insert_block();
-                let original_func = self.current_function;
-                let original_vars = self.variables.clone();
-                let original_ret_type = self.current_function_return_type.clone(); // Save outer return type
-
-                self.builder.position_at_end(entry_block);
-                self.current_function = Some(function);
-                self.current_function_return_type = Some(toy_return_type.clone()); // Set expected return type
-                self.variables.clear();
-
-                // --- Allocate and Store Parameters (using determined types) ---
-                for (i, (param_name, _)) in params.iter().enumerate() {
-                    let param_toy_type = toy_param_types[i].clone(); // Get the type we determined
-                    let llvm_param = function.get_nth_param(i as u32).unwrap();
-                    llvm_param.set_name(param_name);
-                    // llvm_param should already have the correct LLVM type from fn_type
-
-                    let param_alloca =
-                        self.create_entry_block_alloca(param_name, param_toy_type.clone());
-                    self.builder.build_store(param_alloca, llvm_param);
-                    self.variables.insert(
-                        param_name.clone(),
-                        VariableInfo {
-                            ptr: param_alloca,
-                            ty: param_toy_type,
-                            is_mutable: false,
-                        },
+                    let function = self.module.add_function(name, fn_type, None);
+                    // Store signature with FunctionValue
+                    self.functions.insert(
+                        name.clone(),
+                        (toy_param_types.clone(), toy_return_type.clone(), function),
                     );
-                }
 
-                let signature = self.functions.get(name).cloned().unwrap(); // Assume defined
+                    // --- Setup Function Body Context ---
+                    let entry_block = self.context.append_basic_block(function, "entry");
+                    let original_builder_pos = self.builder.get_insert_block();
+                    let original_func = self.current_function;
+                    let original_vars = self.variables.clone();
+                    let original_ret_type = self.current_function_return_type.clone(); // Save outer return type
 
-                // Compile the body statements, check if body guaranteed termination
-                let mut body_terminated = false;
-                let mut body_compile_error = None;
-                match self.compile_program_block(body) {
-                    // Use helper, returns Result<bool>
-                    Ok(terminated) => body_terminated = terminated,
-                    Err(e) => body_compile_error = Some(e), // Capture error
-                }
+                    self.builder.position_at_end(entry_block);
+                    self.current_function = Some(function);
+                    self.current_function_return_type = Some(toy_return_type.clone()); // Set expected return type
+                    self.variables.clear();
 
-                // Handle compilation errors first
-                if let Some(err) = body_compile_error {
-                    // Handle function compilation error
-                    return Err(err);
-                }
+                    // --- Allocate and Store Parameters (using determined types) ---
+                    for (i, (param_name, _)) in params.iter().enumerate() {
+                        let param_toy_type = toy_param_types[i].clone(); // Get the type we determined
+                        let llvm_param = function.get_nth_param(i as u32).unwrap();
+                        llvm_param.set_name(param_name);
+                        // llvm_param should already have the correct LLVM type from fn_type
 
-                // Check if Block Explicitly Returned implicitly via its structure
-                // --- Check if Block Needs Return ---
-                let needs_explicit_return_syntactically = self
-                    .builder
-                    .get_insert_block()
-                    .map_or(true, |bb| bb.get_terminator().is_none());
-
-                if needs_explicit_return_syntactically {
-                    // Function reached end without terminator
-                    match signature.1 {
-                        // signature.1 is return type
-                        Type::Void => {
-                            // OK to implicitly return void
-                            self.builder.build_return(None);
-                        }
-                        non_void_type => {
-                            // ERROR: Non-void function reached end without return.
-                            // Type checker *should* have caught this if path analysis existed.
-                            // Codegen cannot proceed meaningfully.
-                            // We could insert 'unreachable' or just let verification fail.
-                            // Let's let verification fail for now by not adding a terminator.
-                            eprintln!("Codegen Error: Non-void function '{}' ({}) reached end without returning a value.", name, non_void_type);
-                            // No build_return here! Verification will fail.
-                        }
+                        let param_alloca =
+                            self.create_entry_block_alloca(param_name, param_toy_type.clone());
+                        self.builder.build_store(param_alloca, llvm_param);
+                        self.variables.insert(
+                            param_name.clone(),
+                            VariableInfo {
+                                ptr: param_alloca,
+                                ty: param_toy_type,
+                                is_mutable: false,
+                            },
+                        );
                     }
-                }
 
-                // --- Restore Outer Context ---
-                self.variables = original_vars;
-                self.current_function = original_func;
-                self.current_function_return_type = original_ret_type; // Restore outer return type
-                if let Some(bb) = original_builder_pos {
-                    self.builder.position_at_end(bb);
-                }
+                    let signature = self.functions.get(name).cloned().unwrap(); // Assume defined
 
-                // --- Handle errors / Verification / Optimization ---
-                // ... (similar logic, run FPM, check verification) ...
-                if body_compile_error.is_some() || !function.verify(true) {
-                    // Handle function verification failure
+                    // Compile the body statements, check if body guaranteed termination
+                    let mut body_terminated = false;
+                    let mut body_compile_error = None;
+                    match self.compile_program_block(body) {
+                        // Use helper, returns Result<bool>
+                        Ok(terminated) => body_terminated = terminated,
+                        Err(e) => body_compile_error = Some(e), // Capture error
+                    }
+
+                    // Handle compilation errors first
                     if let Some(err) = body_compile_error {
+                        // Handle function compilation error
                         return Err(err);
                     }
-                    return Err(CodeGenError::LlvmError(
-                        "Function verification failed".to_string(),
-                        span,
-                    ));
-                }
-                self.fpm.run_on(&function);
-                if !function.verify(true) {
-                    return Err(CodeGenError::LlvmError(
-                        "Function verification failed after optimization".to_string(),
-                        span,
-                    ));
-                }
 
-                Ok((None, false))
+                    // Check if Block Explicitly Returned implicitly via its structure
+                    // --- Check if Block Needs Return ---
+                    let needs_explicit_return_syntactically = self
+                        .builder
+                        .get_insert_block()
+                        .map_or(true, |bb| bb.get_terminator().is_none());
+
+                    if needs_explicit_return_syntactically {
+                        // Function reached end without terminator
+                        match signature.1 {
+                            // signature.1 is return type
+                            Type::Void => {
+                                // OK to implicitly return void
+                                self.builder.build_return(None);
+                            }
+                            non_void_type => {
+                                // ERROR: Non-void function reached end without return.
+                                // Type checker *should* have caught this if path analysis existed.
+                                // Codegen cannot proceed meaningfully.
+                                // We could insert 'unreachable' or just let verification fail.
+                                // Let's let verification fail for now by not adding a terminator.
+                                eprintln!("Codegen Error: Non-void function '{}' ({}) reached end without returning a value.", name, non_void_type);
+                                // No build_return here! Verification will fail.
+                            }
+                        }
+                    }
+
+                    // --- Restore Outer Context ---
+                    self.variables = original_vars;
+                    self.current_function = original_func;
+                    self.current_function_return_type = original_ret_type; // Restore outer return type
+                    if let Some(bb) = original_builder_pos {
+                        self.builder.position_at_end(bb);
+                    }
+
+                    // --- Handle errors / Verification / Optimization ---
+                    // ... (similar logic, run FPM, check verification) ...
+                    if body_compile_error.is_some() || !function.verify(true) {
+                        // Handle function verification failure
+                        if let Some(err) = body_compile_error {
+                            return Err(err);
+                        }
+                        return Err(CodeGenError::LlvmError(
+                            "Function verification failed".to_string(),
+                            span,
+                        ));
+                    }
+                    self.fpm.run_on(&function);
+                    if !function.verify(true) {
+                        return Err(CodeGenError::LlvmError(
+                            "Function verification failed after optimization".to_string(),
+                            span,
+                        ));
+                    }
+
+                    Ok((None, false))
+                } else {
+                    Err(CodeGenError::InvalidAstNode(
+                        format!("Function '{}' not found during body compilation", name),
+                        span,
+                    )) // Should not happen
+                }
             } // End FunctionDef
         } // End match stmt
     }
@@ -2495,22 +2702,7 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
         let var_type = match value.get_type() {
             // Use helper to get Option<Type>
             Some(ty) => {
-                // Type checker ran successfully, use the resolved type.
-                // Optional: Double-check against type_ann if it exists?
-                if let Some(ann_node) = type_ann {
-                    // Resolve annotation node again (or better, pass resolved Type from TC)
-                    if let Some(ann_type) = resolve_type_node(ann_node, &mut vec![]) {
-                        // Dummy errors vec
-                        if ty != ann_type {
-                            // This signals an internal inconsistency if TC passed!
-                            return Err(CodeGenError::InvalidType(
-                                format!("Internal Error: Inferred value type {} mismatches annotation {} for '{}'", ty, ann_type, name),
-                                span
-                            ));
-                        }
-                    } else { /* Error resolving annotation - should be caught by TC */
-                    }
-                }
+                
                 ty // Use the type from the value expression
             }
             None => {
@@ -2653,23 +2845,5 @@ impl<'a, 'ctx> Compiler<'a, 'ctx> {
             })?;
 
         Ok(())
-    }
-}
-// Need resolve_type_node helper accessible here or pass resolved type differently
-// Placeholder - assumes resolve_type_node is available or move logic
-pub fn resolve_type_node(node: &TypeNode, _errors: &mut Vec<CodeGenError>) -> Option<Type> {
-    // Minimal version for codegen context - real logic is in typechecker
-    match &node.kind {
-        TypeNodeKind::Simple(name) => match name.as_str() {
-            "int" => Some(Type::Int),
-            "float" => Some(Type::Float),
-            "bool" => Some(Type::Bool),
-            "string" => Some(Type::String),
-            "void" => Some(Type::Void),
-            _ => None,
-        },
-        TypeNodeKind::Vector(et_node) => {
-            resolve_type_node(et_node, _errors).map(|t| Type::Vector(Box::new(t)))
-        }
     }
 }

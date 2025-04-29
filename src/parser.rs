@@ -2,7 +2,10 @@
 
 // Use the new AST structures
 use crate::ast::ExpressionKind::BinaryOp;
-use crate::ast::{BinaryOperator, ComparisonOperator, Expression, ExpressionKind, LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator};
+use crate::ast::{
+    BinaryOperator, ComparisonOperator, Expression, ExpressionKind, FieldDef, FieldInit,
+    LogicalOperator, Program, Statement, StatementKind, TypeNode, TypeNodeKind, UnaryOperator,
+};
 use crate::lexer::Lexer;
 use crate::location::{Location, Span};
 use crate::parser::Precedence::Lowest;
@@ -269,6 +272,7 @@ impl<'a> Parser<'a> {
             TokenKind::While => self.parse_while_statement_kind(),
             TokenKind::For => self.parse_for_statement_kind(),
             TokenKind::Return => self.parse_return_statement_kind(),
+            TokenKind::Struct => self.parse_struct_definition_kind(), // Added
             // If none of the above, assume it's an expression statement
             _ => self.parse_expression_statement_kind(),
         };
@@ -286,6 +290,85 @@ impl<'a> Parser<'a> {
         Ok(Statement { kind, span })
 
         // Need to refactor parse_* helpers to return Kind, not Statement struct
+    }
+
+    // Parses: struct IDENT { [FIELD_DEF [, FIELD_DEF]*]? } ;?
+    fn parse_struct_definition_kind(&mut self) -> ParseResult<StatementKind> {
+        self.next_token(); // Consume 'struct'
+
+        // Expect struct name
+        let name = match &self.current_token.kind {
+            TokenKind::Identifier(n) => n.clone(),
+            _ => {
+                return Err(ParseError::ExpectedIdentifier {
+                    loc: self.current_token.loc.clone(),
+                })
+            }
+        };
+        self.next_token(); // Consume name
+
+        // Expect '{'
+        self.expect_and_consume_kind(TokenKind::LBrace)?;
+
+        // Parse field definitions
+        let mut fields = Vec::new();
+        while self.current_token.kind != TokenKind::RBrace
+            && self.current_token.kind != TokenKind::Eof
+        {
+            fields.push(self.parse_field_definition()?);
+            // Expect comma or closing brace
+            if self.current_token.kind == TokenKind::Comma {
+                self.next_token(); // Consume comma
+                                   // Allow trailing comma
+                if self.current_token.kind == TokenKind::RBrace {
+                    break;
+                }
+            } else if self.current_token.kind != TokenKind::RBrace {
+                return Err(ParseError::UnexpectedToken {
+                    expected: String::from("comma or closing brace"),
+                    found: self.current_token.kind.clone(),
+                    loc: self.current_token.loc.clone(),
+                });
+            }
+        }
+
+        // Expect '}'
+        self.expect_and_consume_kind(TokenKind::RBrace)?;
+        // Optional semicolon after struct definition? Let's allow it.
+        if self.current_token.kind == TokenKind::Semicolon {
+            self.next_token();
+        }
+
+        Ok(StatementKind::StructDef { name, fields })
+    }
+
+    // Parses FieldDef: IDENT : TYPE_ANNOTATION
+    fn parse_field_definition(&mut self) -> ParseResult<FieldDef> {
+        let start_loc = self.current_token.loc.clone();
+        // Expect field name
+        let name = match &self.current_token.kind {
+            TokenKind::Identifier(n) => n.clone(),
+            _ => {
+                return Err(ParseError::ExpectedIdentifier {
+                    loc: self.current_token.loc.clone(),
+                })
+            }
+        };
+        self.next_token(); // Consume name
+
+        // Expect ':'
+        self.expect_and_consume_kind(TokenKind::Colon)?;
+
+        // Expect type annotation
+        let type_node = self.parse_type_annotation()?;
+        let end_loc = type_node.span.end.clone(); // Use type node end
+        let span = Span::from_locations(start_loc, end_loc);
+
+        Ok(FieldDef {
+            name,
+            type_node,
+            span,
+        })
     }
 
     // Parses: for ( [INIT_EXPR]? ; [COND_EXPR]? ; [INCR_EXPR]? ) { BODY }
@@ -602,8 +685,12 @@ impl<'a> Parser<'a> {
                     let right = self.parse_expression(current_precedence)?; // Left-associative
                     let span = left.span.combine(&right.span);
                     left = Expression::new(
-                        ExpressionKind::LogicalOp { op, left: Box::new(left), right: Box::new(right) },
-                        span
+                        ExpressionKind::LogicalOp {
+                            op,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        span,
                     );
                 }
                 // Function Call
@@ -772,9 +859,15 @@ impl<'a> Parser<'a> {
                 Ok(Expression::new(ExpressionKind::StringLiteral(s), span))
             }
             // Variable
-            TokenKind::Identifier(n) => {
-                self.next_token();
-                Ok(Expression::new(ExpressionKind::Variable(n), span))
+            TokenKind::Identifier(ref n) => {
+                // Look ahead: If next token is '{', it's a struct literal
+                if self.peek_token.kind == TokenKind::LBrace {
+                    return self.parse_struct_literal(n.clone(), start_loc); // Pass name/loc
+                } else {
+                    // Otherwise, it's a variable
+                    self.next_token();
+                    return Ok(Expression::new(ExpressionKind::Variable(n.clone()), span));
+                }
             }
             // Grouping
             TokenKind::LParen => {
@@ -807,6 +900,73 @@ impl<'a> Parser<'a> {
                 loc: token.loc.clone(),
             }),
         }
+    }
+
+    // Parses StructLiteral: IDENT { [FIELD_INIT [, FIELD_INIT]*]? }
+    fn parse_struct_literal(
+        &mut self,
+        struct_name: String,
+        start_loc: Location,
+    ) -> ParseResult<Expression> {
+        self.next_token(); // Consume Identifier (struct name)
+        self.expect_and_consume_kind(TokenKind::LBrace)?; // Consume '{'
+
+        // Parse field initializers
+        let mut fields = Vec::new();
+        while self.current_token.kind != TokenKind::RBrace
+            && self.current_token.kind != TokenKind::Eof
+        {
+            fields.push(self.parse_field_initializer()?);
+            // Expect comma or closing brace
+            if self.current_token.kind == TokenKind::Comma {
+                self.next_token(); // Consume comma
+                if self.current_token.kind == TokenKind::RBrace {
+                    break;
+                } // Allow trailing comma
+            } else if self.current_token.kind != TokenKind::RBrace {
+                return Err(ParseError::UnexpectedToken {
+                    expected: String::from("comma or closing brace"),
+                    found: self.current_token.kind.clone(),
+                    loc: self.current_token.loc.clone(),
+                });
+            }
+        }
+
+        let end_loc = self.expect_and_consume_kind(TokenKind::RBrace)?; // Consume '}'
+        let span = Span::from_locations(start_loc, end_loc);
+
+        Ok(Expression::new(
+            ExpressionKind::StructLiteral {
+                struct_name,
+                fields,
+            },
+            span,
+        ))
+    }
+
+    // Parses FieldInit: IDENT : EXPRESSION
+    fn parse_field_initializer(&mut self) -> ParseResult<FieldInit> {
+        let start_loc = self.current_token.loc.clone();
+        // Expect field name
+        let name = match &self.current_token.kind {
+            TokenKind::Identifier(n) => n.clone(),
+            _ => {
+                return Err(ParseError::ExpectedIdentifier {
+                    loc: self.current_token.loc.clone(),
+                })
+            }
+        };
+        self.next_token(); // Consume name
+
+        // Expect ':'
+        self.expect_and_consume_kind(TokenKind::Colon)?;
+
+        // Expect value expression
+        let value = self.parse_expression(Precedence::Lowest)?;
+        let end_loc = value.span.end.clone(); // Use value expr end
+        let span = Span::from_locations(start_loc, end_loc);
+
+        Ok(FieldInit { name, value, span })
     }
 
     // Parses VectorLiteral: [ [EXPR [, EXPR]*]? ]
@@ -1005,20 +1165,17 @@ impl<'a> Parser<'a> {
                 let element_type = self.parse_type_annotation()?;
                 let end_loc = self.expect_and_consume_kind(TokenKind::GreaterThan)?; // Expect '>'
                 let span = Span::from_locations(start_loc, end_loc);
-                Ok(TypeNode {
-                    kind: TypeNodeKind::Vector(Box::new(element_type)),
+                Ok(TypeNode::new(
+                    TypeNodeKind::Vector(Box::new(element_type)),
                     span,
-                })
+                ))
             }
             // Simple type name
             TokenKind::Identifier(name) => {
                 // TODO: Validate if name is actually a known type? Typechecker does this.
                 self.next_token(); // Consume identifier
                 let span = Span::single(start_loc);
-                Ok(TypeNode {
-                    kind: TypeNodeKind::Simple(name),
-                    span,
-                })
+                Ok(TypeNode::new(TypeNodeKind::Simple(name), span))
             }
             _ => Err(ParseError::UnexpectedToken {
                 expected: "type name or vec<...>".to_string(),

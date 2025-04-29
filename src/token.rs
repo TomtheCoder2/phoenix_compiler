@@ -1,8 +1,8 @@
 // src/TokenKind.rs
 
-use std::fmt;
 use crate::location::Location;
 use crate::types::Type;
+use std::fmt;
 // Import our new Type enum
 
 // The actual token data structure passed around
@@ -65,6 +65,7 @@ pub enum TokenKind {
     LBrace,    // '{'
     RBrace,    // '}'
     Colon,     // ':' // for type annotations (e.g., let x: int)
+    Dot,       // '.' // for member access (e.g., obj.method)
     LBracket,  // '[' // Added for indexing & literals
     RBracket,  // ']' // Added
 
@@ -79,6 +80,7 @@ pub enum TokenKind {
     While,  // 'while'
     For,    // 'for'
     Return, // 'return'
+    Struct, // 'struct'
     // Type Keywords (optional, could use identifiers)
     // TypeInt, // 'int'
     // TypeFloat, // 'float'
@@ -124,6 +126,7 @@ impl fmt::Display for TokenKind {
             TokenKind::LBrace => write!(f, "{{"),
             TokenKind::RBrace => write!(f, "}}"),
             TokenKind::Colon => write!(f, ":"),
+            TokenKind::Dot => write!(f, "."),
             TokenKind::LBracket => write!(f, "["),
             TokenKind::RBracket => write!(f, "]"),
             TokenKind::Let => write!(f, "let"),
@@ -137,6 +140,7 @@ impl fmt::Display for TokenKind {
             TokenKind::For => write!(f, "for"),
             TokenKind::Return => write!(f, "return"),
             TokenKind::Identifier(s) => write!(f, "Identifier({})", s),
+            TokenKind::Struct => write!(f, "struct"),
             // TokenKind::TypeInt => write!(f, "int"),
             // TokenKind::TypeFloat => write!(f, "float"),
             // TokenKind::TypeBool => write!(f, "bool"),

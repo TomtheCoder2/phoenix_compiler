@@ -11,6 +11,24 @@ pub type NumberType = f64;
 pub struct TypeNode {
     pub kind: TypeNodeKind,
     pub span: Span,
+    pub resolved_type: RefCell<Option<Type>>, // Added resolved type
+}
+
+impl TypeNode {
+    pub fn new(kind: TypeNodeKind, span: Span) -> Self {
+        TypeNode {
+            kind,
+            span,
+            resolved_type: RefCell::new(None),
+        }
+    }
+    pub fn get_type(&self) -> Option<Type> {
+        // todo: check if we really need to clone the type
+        self.resolved_type.borrow().clone()
+    }
+    pub fn set_type(&self, ty: Type) {
+        *self.resolved_type.borrow_mut() = Some(ty);
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -35,6 +53,22 @@ pub fn type_node_to_type(type_node: &TypeNode) -> Type {
             Type::Vector(Box::new(inner))
         }
     }
+}
+
+// Field definition within a struct AST node
+#[derive(Debug, PartialEq, Clone)]
+pub struct FieldDef {
+    pub name: String,
+    pub type_node: TypeNode, // Type annotation for the field
+    pub span: Span,          // Span covering "name: type"
+}
+
+// Field initialization within a struct literal AST node
+#[derive(Debug, PartialEq, Clone)]
+pub struct FieldInit {
+    pub name: String,
+    pub value: Expression, // Expression providing the initial value
+    pub span: Span,        // Span covering "name: value"
 }
 
 // Program is still a list of statements
@@ -196,6 +230,9 @@ impl Expression {
                     right.to_code()
                 )
             }
+            _ => {
+                todo!()
+            }
         }
     }
 }
@@ -267,6 +304,10 @@ pub enum StatementKind {
     ReturnStmt {
         value: Option<Expression>,
     },
+    StructDef {
+        name: String,
+        fields: Vec<FieldDef>, // Holds parsed field definitions
+    },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -337,6 +378,10 @@ pub enum ExpressionKind {
     IndexAccess {
         target: Box<Expression>, // Expression yielding a vector (or array/string later)
         index: Box<Expression>,  // Expression yielding an integer index
+    },
+    StructLiteral {
+        struct_name: String,
+        fields: Vec<FieldInit>, // Holds parsed field initializers
     },
 }
 

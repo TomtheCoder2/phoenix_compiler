@@ -1,6 +1,7 @@
 use crate::location::Span;
 use crate::types::Type;
 use std::collections::HashMap;
+use crate::typechecker::StructDefinition;
 
 // Reusing VariableInfo from codegen for now, might become specific later
 // We need mutability info here too.
@@ -32,6 +33,7 @@ pub struct SymbolTable {
     scopes: Vec<Scope>,
     // Keep functions global for now
     functions: HashMap<String, FunctionSignature>,
+    pub(crate) structs: HashMap<String, StructDefinition>, // Added: Struct name -> Definition
 }
 
 impl SymbolTable {
@@ -40,7 +42,24 @@ impl SymbolTable {
         SymbolTable {
             scopes: vec![Scope::default()], // Global scope
             functions: HashMap::new(),
+            structs: HashMap::new(), // Initialize empty struct map
         }
+    }
+
+    /// Define a struct type globally.
+    pub fn define_struct(&mut self, definition: StructDefinition) -> Result<(), Span> {
+        if self.structs.contains_key(&definition.name) {
+            let prev_span = &self.structs.get(&definition.name).unwrap().def_span;
+            Err(prev_span.clone())
+        } else {
+            self.structs.insert(definition.name.clone(), definition);
+            Ok(())
+        }
+    }
+
+    /// Look up a struct definition by name.
+    pub fn lookup_struct(&self, name: &str) -> Option<&StructDefinition> {
+        self.structs.get(name)
     }
 
     /// Enter a new lexical scope (e.g., function body, block)
@@ -96,6 +115,7 @@ impl SymbolTable {
 
     /// Define a function (globally for now).
     /// Returns error if already defined.
+    // todo: define the function in the current scope
     pub fn define_function(
         &mut self,
         name: &str,
